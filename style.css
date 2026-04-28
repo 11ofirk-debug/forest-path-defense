@@ -1,0 +1,31 @@
+body {
+    font-family: Arial, sans-serif;
+    background-color: #1f2f1f;
+    color: #f0f0d8;
+    text-align: center;
+}
+
+#gameContainer {
+    display: flex;
+    justify-content: center;
+    gap: 20px;
+}
+
+#gameCanvas {
+    background-color: #355e3b;
+    border: 4px solid #8b6f47;
+}
+
+#sidePanel {
+    width: 220px;
+    padding: 15px;
+    background-color: #2d3f2d;
+    border: 3px solid #8b6f47;
+    text-align: left;
+}
+
+button {
+    width: 100%;
+    padding: 10px;
+    cursor: pointer;
+}
