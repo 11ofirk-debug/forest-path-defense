@@ -238,6 +238,8 @@ let gold = 100;
 let wave = 1;
 let bullets = [];
 let activeMenu = null; // { col, row, mode } mode = "slot" or "tower"
+let mousePos = { x: 0, y: 0 };
+
 
 let enemies = [];
 let towers = [];
@@ -677,7 +679,28 @@ canvas.addEventListener("click", (event) => {
     const rect = canvas.getBoundingClientRect();
     const px = event.clientX - rect.left;
     const py = event.clientY - rect.top;
-
+    // Check if clicking a plus upgrade icon
+    
+    for (let tower of towers) {
+        if (tower.tier >= 2) continue;
+        const { x: cx, y: cy } = hexToPixel(tower.col, tower.row);
+        const plusX = cx + HEX_SIZE * 0.6;
+        const plusY = cy - HEX_SIZE * 0.8;
+        if (Math.hypot(px - plusX, py - plusY) <= 10) {
+            const def = towerDefs[tower.type];
+            if (gold >= def.upgradeCost) {
+                gold -= def.upgradeCost;
+                tower.damage += def.upgradeDamage;
+                tower.range += def.upgradeRange;
+                tower.tier = 2;
+                messageDisplay.innerText = `${tower.type === "catapult" ? "Catapult" : "Crossbow"} upgraded!`;
+                updateUI();
+            } else {
+                messageDisplay.innerText = "Not enough gold!";
+            }
+            return;
+        }
+    }
     // Active skill targeting
     if (pendingSkill) {
         const def = skillDefs[pendingSkill];
@@ -853,6 +876,11 @@ canvas.addEventListener("click", (event) => {
         activeMenu = { col, row, mode: "slot" };
     }
 });
+canvas.addEventListener("mousemove", (event) => {
+    const rect = canvas.getBoundingClientRect();
+    mousePos.x = event.clientX - rect.left;
+    mousePos.y = event.clientY - rect.top;
+});
 window.addEventListener("keydown", (e) => {
     if (gameOver || gameWon) return;
 
@@ -972,6 +1000,59 @@ function drawMenu() {
             // Row 3: scrap
             ctx.fillStyle = "#ff9060";
             ctx.fillText(`🗑 Scrap (+${refund}g)`, menuX + 10, menuY + MENU_ROW3);
+        }
+    }
+}
+function drawUpgradeIndicators() {
+    for (let tower of towers) {
+        if (tower.tier >= 2) continue;
+
+        const { x: cx, y: cy } = hexToPixel(tower.col, tower.row);
+        const plusX = cx + HEX_SIZE * 0.6;
+        const plusY = cy - HEX_SIZE * 0.8;
+        const radius = 6;
+
+        // Transparent circle with white outline
+        ctx.beginPath();
+        ctx.arc(plusX, plusY, radius, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(255,255,255,0.15)";
+        ctx.fill();
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Plus sign
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(plusX - 3, plusY);
+        ctx.lineTo(plusX + 3, plusY);
+        ctx.moveTo(plusX, plusY - 3);
+        ctx.lineTo(plusX, plusY + 3);
+        ctx.stroke();
+
+        // Tooltip on hover
+        const dx = mousePos.x - plusX;
+        const dy = mousePos.y - plusY;
+        if (Math.hypot(dx, dy) <= radius + 4) {
+            const tipText = "Click to upgrade tower";
+            ctx.font = "11px Arial";
+            const tipW = ctx.measureText(tipText).width + 16;
+            const tipH = 22;
+            const tipX = plusX - tipW / 2;
+            const tipY = plusY - tipH - 6;
+
+            ctx.fillStyle = "#1a2a1a";
+            ctx.strokeStyle = "#8b6f47";
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.roundRect(tipX, tipY, tipW, tipH, 4);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = "#f0f0d8";
+            ctx.textAlign = "center";
+            ctx.fillText(tipText, plusX, tipY + 15);
         }
     }
 }
@@ -1327,6 +1408,7 @@ function updateTowers() {
             drawElias();
             drawFence();
             drawTowers();
+            drawUpgradeIndicators(); 
             drawSplashes();
             drawBullets();
             drawEnemies();
