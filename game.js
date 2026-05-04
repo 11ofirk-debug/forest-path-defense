@@ -1,4 +1,5 @@
 let animationFrameId = null;
+let lastFrameTime = null;
 // ─── GOOGLE SHEETS CONFIG ─────────────────────────────────────────────────────
 const SHEET_TABS = {
     path: "https://docs.google.com/spreadsheets/d/e/2PACX-1vRLux8wUWBie8iABrxq8JzZnOE3UqbfIjr2VnpzR0g-QDhGd2hBoF1rLKwsZY9bSU-cv8Piycw2v_i1/pub?gid=0&single=true&output=csv",
@@ -440,15 +441,17 @@ function drawElias() {
     ctx.drawImage(eliasImage, cx - ew / 2, cy - eh, ew, eh);
 }
 // ─── WAVES ────────────────────────────────────────────────────────────────────
-function updateWaves() {
+function updateWaves(dt) {
     if (gameOver) return;
 
     if (betweenWaves) {
-        if (--waveTimer <= 0) startWave();
+        waveTimer -= dt;
+        if (waveTimer <= 0) startWave();
         return;
     }
     if (enemiesToSpawn > 0) {
-        if (--spawnTimer <= 0) {
+        spawnTimer -= dt;
+        if (spawnTimer <= 0) {
             spawnEnemy();
             enemiesToSpawn--;
             spawnTimer = spawnDelay;
@@ -564,11 +567,11 @@ function updateEnemies() {
         const dy = target.y - enemy.y;
         const dist = Math.hypot(dx, dy);
         enemy.dirX = Math.sign(dx);
-        if (dist < enemy.speed) {
+        if (dist < enemy.speed * dt) {
             enemy.pathIndex++;
         } else {
-            enemy.x += (dx / dist) * enemy.speed;
-            enemy.y += (dy / dist) * enemy.speed;
+            enemy.x += (dx / dist) * enemy.speed * dt;
+            enemy.y += (dy / dist) * enemy.speed * dt;
         }
     }
 
@@ -799,6 +802,7 @@ canvas.addEventListener("click", (event) => {
         pendingSkill = null;
         floatingNumbers = [];
         fenceFlicker = { active: false, start: 0 };
+        lastFrameTime = null;
         updateUI();
         gameLoop();
         return;
@@ -1267,7 +1271,7 @@ function updateTowers() {
             }
             continue;
         }
-        if (tower.cooldown > 0) { tower.cooldown--; tower.target = null; continue; }
+        if (tower.cooldown > 0) { tower.cooldown -= dt; tower.target = null; continue; }
 
         const { x: tx, y: ty } = hexToPixel(tower.col, tower.row);
         let closest = null, closestDist = Infinity;
@@ -1405,16 +1409,16 @@ function updateTowers() {
         }
     }
 }
-        function updateBullets() {
+        function updateBullets(dt) {
             for (let bullet of bullets) {
                 const dx = bullet.tx - bullet.x;
                 const dy = bullet.ty - bullet.y;
                 const dist = Math.hypot(dx, dy);
-                if (dist < bullet.speed) {
+                if (dist < bullet.speed * dt) {
                     bullet.done = true;
                 } else {
-                    bullet.x += (dx / dist) * bullet.speed;
-                    bullet.y += (dy / dist) * bullet.speed;
+                    bullet.x += (dx / dist) * bullet.speed * dt;
+                    bullet.y += (dy / dist) * bullet.speed * dt;
                 }
             }
             bullets = bullets.filter(b => !b.done);
@@ -1588,7 +1592,10 @@ function updateTowers() {
             }
         }
         // ─── GAME LOOP ────────────────────────────────────────────────────────────────
-        function gameLoop() {
+        function gameLoop(timestamp) {
+            const dt = lastFrameTime === null ? 1 : Math.min((timestamp - lastFrameTime) / (1000 / 60), 3);
+            lastFrameTime = timestamp;
+
             ctx.save();
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             applyHexMask();
@@ -1602,10 +1609,10 @@ function updateTowers() {
                 return;
             }
 
-            updateWaves();
-            updateEnemies();
-            updateTowers();
-            updateBullets();
+            updateWaves(dt);
+            updateEnemies(dt);
+            updateTowers(dt);
+            updateBullets(dt);
             updateSplashes();
             updateSporeClouds(); 
             updateProjectiles(); 
