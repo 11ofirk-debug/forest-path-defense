@@ -217,6 +217,7 @@ const LUMBERJACK_ANCHOR_OFFSET = 12;
 const CATAPULT_ANCHOR_OFFSET = 12;  
 const WARDEN_ANCHOR_OFFSET = 12; 
 const CROSSBOW_ANCHOR_OFFSET = 12; 
+const ELIAS_ANCHOR_OFFSET = 60;
 const FENCE_ANCHOR_OFFSET = -6;
 const SPORECAP_ANCHOR_OFFSET = 6;
 
@@ -438,7 +439,7 @@ function drawElias() {
     // Highlight tile
     drawHex(cx, cy, "rgba(255,220,100,0.15)");
     // Sprite — center bottom anchored
-    ctx.drawImage(eliasImage, cx - ew / 2, cy - eh, ew, eh);
+    ctx.drawImage(eliasImage, cx - ew / 2, cy - eh + ELIAS_ANCHOR_OFFSET, ew, eh);
 }
 // ─── WAVES ────────────────────────────────────────────────────────────────────
 function updateWaves(dt) {
@@ -745,7 +746,7 @@ canvas.addEventListener("click", (event) => {
         const def = skillDefs[pendingSkill];
         const eliasPixel = hexToPixel(ELIAS_COL, ELIAS_ROW);
         const ELIAS_THROW_OFFSET_X = -10;
-        const ELIAS_THROW_OFFSET_Y = -30;
+        const ELIAS_THROW_OFFSET_Y = 40;
 
         const startX = eliasPixel.x + ELIAS_THROW_OFFSET_X;
         const startY = eliasPixel.y + ELIAS_THROW_OFFSET_Y;
