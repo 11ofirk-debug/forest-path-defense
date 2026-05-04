@@ -64,8 +64,6 @@ async function loadLevelData() {
         byTab[tab] = data;
 
     }
-    console.log("byTab.activeSkills:", byTab.activeSkills);
-    console.log("skillDefs after parse:", skillDefs);
     // ── Path ──
     try {
         path.length = 0;
@@ -107,23 +105,28 @@ async function loadLevelData() {
     }
 
     // ── Towers ──
-    try {
-        towerDefs = {};
-        for (const row of byTab.towers) {
-            towerDefs[row.type] = {
-                cost: parseFloat(row.cost),
-                damage: parseFloat(row.damage),
-                fireRate: parseFloat(row.fireRate),
-                range: parseFloat(row.range),
-                upgradeCost: parseFloat(row.upgradeCost),
-                upgradeDamage: parseFloat(row.upgradeDamage),
-                upgradeRange: parseFloat(row.upgradeRange)
-            };
-        }
-    } catch (e) {
-        showLoadError("Error parsing towers tab: " + e.message);
-        return false;
+try {
+    towerDefs = {};
+    for (const row of byTab.towers) {
+        const type = row.type;
+        const tier = parseInt(row.tier);
+        if (!towerDefs[type]) towerDefs[type] = { maxTier: 0 };
+        towerDefs[type][tier] = {
+            cost:              parseFloat(row.cost) || 0,
+            damage:            parseFloat(row.damage) || 0,
+            fireRate:          parseFloat(row.fireRate) || 0,
+            range:             parseFloat(row.range) || 0,
+            aoeRadius:         parseFloat(row.aoeRadius) || 0,
+            aoeDuration:       parseFloat(row.aoeDuration) || 0,
+            aoeDamageInterval: parseFloat(row.aoeDamageInterval) || 0,
+            cooldown:          parseFloat(row.cooldown) || 0
+        };
+        if (tier > towerDefs[type].maxTier) towerDefs[type].maxTier = tier;
     }
+} catch(e) {
+    showLoadError("Error parsing towers tab: " + e.message);
+    return false;
+}
 
     // ── Waves ──
     try {
@@ -152,7 +155,6 @@ async function loadLevelData() {
         showLoadError("Error parsing activeSkills tab: " + e.message);
         return false;
     }
-
     return true;
 }
 // ─── HEX GRID SETUP ───────────────────────────────────────────────────────────
@@ -162,21 +164,27 @@ const ctx = canvas.getContext("2d");
 canvas.width = 840;
 canvas.height = 540;
 
-const HEX_SIZE = 24;
+const HEX_SIZE = 20;
 const HEX_W = Math.sqrt(3) * HEX_SIZE;
 const HEX_H = 2 * HEX_SIZE;
 const COL_STEP = HEX_W;
 const ROW_STEP = HEX_H * 0.75;
 
-const GRID_COLS = 19;
-const GRID_ROWS = 13;
+const GRID_COLS = 21;
+const GRID_ROWS = 17;
 
-const ORIGIN_X = HEX_W / 2;
-const ORIGIN_Y = HEX_SIZE;
+// Hex-shaped playfield: cube radius from center tile
+const HEX_GRID_RADIUS = 8;
+const HEX_GRID_CENTER_COL = 10;
+const HEX_GRID_CENTER_ROW = 8;
+
+// Center the grid on the canvas
+const ORIGIN_X = canvas.width  / 2 - HEX_GRID_CENTER_COL * HEX_W;
+const ORIGIN_Y = canvas.height / 2 - HEX_GRID_CENTER_ROW * ROW_STEP;
 
 // Elias stands on a fixed tile adjacent to the fence
-const ELIAS_COL = 18; // adjust if needed to sit next to your fence
-const ELIAS_ROW = 9;
+const ELIAS_COL = 18;
+const ELIAS_ROW = 8;
 
 const MAX_FENCE_ATTACKERS = 3;
 const LUMBERJACK_ATTACK_INTERVAL = 2500;
@@ -201,11 +209,15 @@ const molotovIcon = new Image();
 molotovIcon.src = "images/molotov.png";
 const acidIcon = new Image();
 acidIcon.src = "images/acid.png";
+const sporecapImage = new Image();
+sporecapImage.src = "images/sporecap.png";
 // Anchor offsets — raise sprite by this many px to compensate for transparent padding
-const LUMBERJACK_ANCHOR_OFFSET = 12;  // tweak this per sprite
-const CATAPULT_ANCHOR_OFFSET = 12;  // tweak this per sprite
-const WARDEN_ANCHOR_OFFSET = 12; // tweak as needed
-const CROSSBOW_ANCHOR_OFFSET = 12; // tweak as needed
+const LUMBERJACK_ANCHOR_OFFSET = 12;  
+const CATAPULT_ANCHOR_OFFSET = 12;  
+const WARDEN_ANCHOR_OFFSET = 12; 
+const CROSSBOW_ANCHOR_OFFSET = 12; 
+const FENCE_ANCHOR_OFFSET = -6;
+const SPORECAP_ANCHOR_OFFSET = 6;
 
 crossbowImage.onload = () => console.log("Crossbow image loaded!");
 crossbowImage.onerror = () => console.error("Crossbow image FAILED to load!");
@@ -221,7 +233,7 @@ const MENU_ROW1 = 24; // info text
 const MENU_ROW2 = 52; // upgrade text  
 const MENU_ROW3 = 80; // scrap text
 const MENU_H_TOWER = 95;
-const MENU_H_SLOT = 80;
+const MENU_H_SLOT = 110;
 const MAX_FENCE_HP = 30;
 
 
@@ -243,6 +255,7 @@ let mousePos = { x: 0, y: 0 };
 
 let enemies = [];
 let towers = [];
+let projectiles = [];
 let splashes = [];
 let enemiesToSpawn = 0;
 let spawnTimer = 0;
@@ -257,6 +270,7 @@ let enemyDefs = {};
 let towerDefs = {};
 let waveDefs = [];
 let floatingNumbers = [];
+let sporeClouds = [];
 
 let skillDefs = {};
 let activeSkills = {
@@ -313,10 +327,28 @@ function drawHex(cx, cy, fillColor, strokeColor = "#ffffff22") {
     ctx.stroke();
 }
 
+function offsetToCube(col, row) {
+    const q = col - (row - (row & 1)) / 2;
+    return { q, r: row, s: -q - row };
+}
+
+const _centerCube = offsetToCube(HEX_GRID_CENTER_COL, HEX_GRID_CENTER_ROW);
+
+function isInHexGrid(col, row) {
+    if (col < 0 || col >= GRID_COLS || row < 0 || row >= GRID_ROWS) return false;
+    const { q, r, s } = offsetToCube(col, row);
+    return Math.max(
+        Math.abs(q - _centerCube.q),
+        Math.abs(r - _centerCube.r),
+        Math.abs(s - _centerCube.s)
+    ) <= HEX_GRID_RADIUS;
+}
+
 function pixelToHex(px, py) {
     let bestCol = 0, bestRow = 0, bestDist = Infinity;
     for (let row = 0; row < GRID_ROWS; row++) {
         for (let col = 0; col < GRID_COLS; col++) {
+            if (!isInHexGrid(col, row)) continue;
             const { x, y } = hexToPixel(col, row);
             const d = Math.hypot(px - x, py - y);
             if (d < bestDist) {
@@ -336,10 +368,11 @@ function isPathHex(col, row) {
 // ─── CANVAS HEX MASK ──────────────────────────────────────────────────────────
 // Clips the entire canvas to a large hexagon shape, hiding the corners.
 function applyHexMask() {
-    // Find the actual pixel extent of all hex tile corners
+    // Find the actual pixel extent of all in-grid hex tile corners
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (let row = 0; row < GRID_ROWS; row++) {
         for (let col = 0; col < GRID_COLS; col++) {
+            if (!isInHexGrid(col, row)) continue;
             const { x, y } = hexToPixel(col, row);
             for (const c of hexCorners(x, y)) {
                 minX = Math.min(minX, c.x);
@@ -381,6 +414,7 @@ function drawTileIDs() {
     ctx.textBaseline = "middle";
     for (let row = 0; row < GRID_ROWS; row++) {
         for (let col = 0; col < GRID_COLS; col++) {
+            if (!isInHexGrid(col, row)) continue;
             const { x, y } = hexToPixel(col, row);
             const id = row * GRID_COLS + col;
             ctx.fillStyle = "rgba(255,255,255,0.7)";
@@ -682,18 +716,21 @@ canvas.addEventListener("click", (event) => {
     // Check if clicking a plus upgrade icon
     
     for (let tower of towers) {
-        if (tower.tier >= 2) continue;
+        const maxTier = towerDefs[tower.type] ? towerDefs[tower.type].maxTier : 1;
+        if (tower.tier >= maxTier) continue;
         const { x: cx, y: cy } = hexToPixel(tower.col, tower.row);
         const plusX = cx + HEX_SIZE * 0.6;
         const plusY = cy - HEX_SIZE * 0.8;
         if (Math.hypot(px - plusX, py - plusY) <= 10) {
-            const def = towerDefs[tower.type];
-            if (gold >= def.upgradeCost) {
-                gold -= def.upgradeCost;
-                tower.damage += def.upgradeDamage;
-                tower.range += def.upgradeRange;
-                tower.tier = 2;
-                messageDisplay.innerText = `${tower.type === "catapult" ? "Catapult" : "Crossbow"} upgraded!`;
+            const nextDef = towerDefs[tower.type][tower.tier + 1];
+            const upgradeCost = nextDef.cost;
+            if (gold >= upgradeCost) {
+                gold -= upgradeCost;
+                tower.tier++;
+                tower.damage   = nextDef.damage;
+                tower.range    = nextDef.range;
+                tower.fireRate = nextDef.fireRate;
+                messageDisplay.innerText = `${tower.type} upgraded to T${tower.tier}!`;
                 updateUI();
             } else {
                 messageDisplay.innerText = "Not enough gold!";
@@ -701,44 +738,38 @@ canvas.addEventListener("click", (event) => {
             return;
         }
     }
-    // Active skill targeting
     if (pendingSkill) {
         const def = skillDefs[pendingSkill];
-        // Deal damage to all enemies in radius
-        for (let enemy of enemies) {
-            const d = Math.hypot(enemy.x - px, enemy.y - py);
-            if (d <= def.radius) {
-                enemy.hp -= def.damage;
-                triggerFlicker(enemy);
-                spawnHitFeedback(enemy.x, enemy.y - 20, def.damage, "#ffd700");
-                if (enemy.hp <= 0) {
-                    enemy.dead = true;
-                    gold += enemy.goldDrop;
-                    updateUI();
-                }
-            }
-        }
-        enemies = enemies.filter(e => !e.dead);
+        const eliasPixel = hexToPixel(ELIAS_COL, ELIAS_ROW);
+        const ELIAS_THROW_OFFSET_X = -10;
+        const ELIAS_THROW_OFFSET_Y = -30;
 
-        // Spawn splash animation
-        const color = pendingSkill === "molotov" ? "255,120,30" : "120,255,60";
-        splashes.push({
-            x: px,
-            y: py,
-            maxRadius: def.radius,
+        const startX = eliasPixel.x + ELIAS_THROW_OFFSET_X;
+        const startY = eliasPixel.y + ELIAS_THROW_OFFSET_Y;
+
+        const PROJECTILE_SPEED = 400; // pixels per second
+        const dist = Math.hypot(px - startX, py - startY);
+        const duration = (dist / PROJECTILE_SPEED) * 1000;
+
+        projectiles.push({
+            skill: pendingSkill,
+            sx: startX,
+            sy: startY,
+            tx: px,
+            ty: py,
+            x: startX,
+            y: startY,
             startTime: performance.now(),
-            duration: 600,
-            color
+            duration,
+            arcHeight: Math.min(dist * 0.3, 120)
         });
 
-        // Start cooldown
         activeSkills[pendingSkill].cooldownStart = performance.now();
         pendingSkill = null;
         skillMessage.innerText = "";
         return;
     }
-
-    const { col, row } = pixelToHex(px, py);
+      
     // Restart button
     if ((gameOver || gameWon) &&
         px >= restartBtn.x && px <= restartBtn.x + restartBtn.w &&
@@ -749,8 +780,10 @@ canvas.addEventListener("click", (event) => {
         gameWon = false;
         enemies = [];
         towers = [];
+        sporeClouds = [];
         bullets = [];
         splashes = [];
+        projectiles = [];
         wave = 1;
         enemiesToSpawn = 0;
         spawnTimer = 0;
@@ -779,87 +812,67 @@ canvas.addEventListener("click", (event) => {
             const menuY = cy - MENU_H_SLOT - HEX_SIZE;
             if (px >= menuX && px <= menuX + MENU_W && py >= menuY && py <= menuY + MENU_H_SLOT) {
                 const relY = py - menuY;
-                // Catapult row: text at MENU_ROW1, clickable up to midpoint between row1 and row2
+                let type, extraProps = {};
                 if (relY < (MENU_ROW1 + MENU_ROW2) / 2) {
-                    const catDef = towerDefs["catapult"];
-                    if (gold >= catDef.cost) {
-                        towers.push({
-                            type: "catapult", col: activeMenu.col, row: activeMenu.row,
-                            range: catDef.range, damage: catDef.damage, fireRate: catDef.fireRate,
-                            cooldown: 0, tier: 1, target: null
-                        });
-                        gold -= catDef.cost;
-                        messageDisplay.innerText = "Catapult placed!";
-                        updateUI();
-                    } else { messageDisplay.innerText = "Not enough gold!"; }
+                    type = "catapult";
+                } else if (relY < (MENU_ROW2 + MENU_ROW3) / 2) {
+                    type = "crossbow";
                 } else {
-                    const bowDef = towerDefs["crossbow"];
-                    if (gold >= bowDef.cost) {
-                        towers.push({
-                            type: "crossbow", col: activeMenu.col, row: activeMenu.row,
-                            range: bowDef.range, damage: bowDef.damage, fireRate: bowDef.fireRate,
-                            cooldown: 0, tier: 1, target: null
-                        });
-                        gold -= bowDef.cost;
-                        messageDisplay.innerText = "Crossbow placed!";
-                        updateUI();
-                    } else { messageDisplay.innerText = "Not enough gold!"; }
+                    type = "sporecap";
+                    extraProps = { activeCloud: null, sporeOnCooldown: false };
                 }
-                activeMenu = null;
-                return;
+                const def = towerDefs[type][1];
+                if (gold >= def.cost) {
+                    towers.push({ type, col: activeMenu.col, row: activeMenu.row,
+                        range: def.range, damage: def.damage, fireRate: def.fireRate,
+                        cooldown: 0, tier: 1, target: null, ...extraProps });
+                    gold -= def.cost;
+                    messageDisplay.innerText = `${type.charAt(0).toUpperCase() + type.slice(1)} placed!`;
+                    updateUI();
+                } else {
+                    messageDisplay.innerText = "Not enough gold!";
+                }
             }
+            activeMenu = null;
+            return;
+        }
 
-        } else if (activeMenu.mode === "tower") {
-            if (activeMenu.scrapConfirm) {
-                const menuH = 60;
+        if (activeMenu.mode === "tower") {
+            const tower = towers.find(t => t.col === activeMenu.col && t.row === activeMenu.row);
+            if (tower) {
+                const menuH = MENU_ROW3 + 15;
                 const menuY = cy - menuH - HEX_SIZE;
                 if (px >= menuX && px <= menuX + MENU_W && py >= menuY && py <= menuY + menuH) {
                     const relY = py - menuY;
-                    if (relY < 35) {
-                        const tower = towers.find(t => t.col === activeMenu.col && t.row === activeMenu.row);
-                        const refund = Math.floor((tower.type === "catapult" ? 50 : 30) * 0.3);
-                        towers = towers.filter(t => !(t.col === activeMenu.col && t.row === activeMenu.row));
+                    if (relY >= (MENU_ROW1 + MENU_ROW2) / 2 && relY < (MENU_ROW2 + MENU_ROW3) / 2) {
+                        const maxTier = towerDefs[tower.type].maxTier;
+                        if (tower.tier >= maxTier) {
+                            messageDisplay.innerText = "Already max tier!";
+                        } else {
+                            const nextDef = towerDefs[tower.type][tower.tier + 1];
+                            if (gold >= nextDef.cost) {
+                                gold -= nextDef.cost;
+                                tower.tier++;
+                                tower.damage   = nextDef.damage;
+                                tower.range    = nextDef.range;
+                                tower.fireRate = nextDef.fireRate;
+                                messageDisplay.innerText = `${tower.type} upgraded to T${tower.tier}!`;
+                                updateUI();
+                            } else {
+                                messageDisplay.innerText = "Not enough gold!";
+                            }
+                        }
+                    } else if (relY >= (MENU_ROW2 + MENU_ROW3) / 2) {
+                        const refund = Math.floor(towerDefs[tower.type][1].cost * 0.3);
                         gold += refund;
-                        messageDisplay.innerText = `Scrapped! +${refund}g refunded.`;
+                        towers = towers.filter(t => t !== tower);
+                        messageDisplay.innerText = `Scrapped! (+${refund}g)`;
                         updateUI();
                     }
-                    activeMenu = null;
-                    return;
-                }
-            } else {
-                const menuY = cy - MENU_H_TOWER - HEX_SIZE;
-                if (px >= menuX && px <= menuX + MENU_W && py >= menuY && py <= menuY + MENU_H_TOWER) {
-                    const relY = py - menuY;
-                    const upgradeZone = (MENU_ROW2 + MENU_ROW3) / 2; // midpoint between upgrade and scrap
-                    if (relY < upgradeZone) {
-                        // Upgrade zone
-                        const tower = towers.find(t => t.col === activeMenu.col && t.row === activeMenu.row);
-                        if (tower.tier >= 2) {
-                            messageDisplay.innerText = "Already max tier!";
-                            activeMenu = null;
-                            return;
-                        }
-                        const def = towerDefs[tower.type];
-                        const upgradeCost = def.upgradeCost;
-                        if (gold >= upgradeCost) {
-                            gold -= upgradeCost;
-                            tower.damage += def.upgradeDamage;
-                            tower.range += def.upgradeRange;
-                            tower.tier = 2;
-                            messageDisplay.innerText = `${tower.type === "catapult" ? "Catapult" : "Crossbow"} upgraded!`;
-                            updateUI();
-                        } else {
-                            messageDisplay.innerText = "Not enough gold!";
-                        }
-                    } else {
-                        // Scrap zone
-                        activeMenu = { ...activeMenu, scrapConfirm: true };
-                        return;
-                    }
-                    activeMenu = null;
-                    return;
                 }
             }
+            activeMenu = null;
+            return;
         }
 
         activeMenu = null;
@@ -867,6 +880,8 @@ canvas.addEventListener("click", (event) => {
     }
 
     // No menu open
+    const { col, row } = pixelToHex(px, py);
+    if (!isInHexGrid(col, row)) return;
     const existingTower = towers.find(t => t.col === col && t.row === row);
     if (existingTower) {
         activeMenu = { col, row, mode: "tower", scrapConfirm: false };
@@ -910,6 +925,118 @@ window.addEventListener("keydown", (e) => {
         }
     }
 });
+function updateProjectiles() {
+    const now = performance.now();
+    for (let p of projectiles) {
+        const elapsed = now - p.startTime;
+        const t = Math.min(elapsed / p.duration, 1); // 0 → 1
+
+        // Linear interpolation for x
+        p.x = p.sx + (p.tx - p.sx) * t;
+        // Arc: parabola on y axis
+        p.y = p.sy + (p.ty - p.sy) * t - p.arcHeight * 4 * t * (1 - t);
+
+        if (t >= 1) {
+            p.arrived = true;
+            // Trigger the actual damage and splash when projectile lands
+            const def = skillDefs[p.skill];
+            for (let enemy of enemies) {
+                const d = Math.hypot(enemy.x - p.tx, enemy.y - p.ty);
+                if (d <= def.radius) {
+                    enemy.hp -= def.damage;
+                    triggerFlicker(enemy);
+                    spawnHitFeedback(enemy.x, enemy.y - 20, def.damage, "#ffd700");
+                    if (enemy.hp <= 0) {
+                        enemy.dead = true;
+                        gold += enemy.goldDrop;
+                        updateUI();
+                    }
+                }
+            }
+            enemies = enemies.filter(e => !e.dead);
+
+            // Splash animation on landing
+            const color = p.skill === "molotov" ? "255,120,30" : "120,255,60";
+            splashes.push({
+                x: p.tx, y: p.ty,
+                maxRadius: def.radius,
+                startTime: performance.now(),
+                duration: 600,
+                color
+            });
+        }
+    }
+    projectiles = projectiles.filter(p => !p.arrived);
+}
+
+function drawProjectiles() {
+    for (let p of projectiles) {
+        const color = p.skill === "molotov" ? "#ffd700" : "#80ff40";
+        const glowColor = p.skill === "molotov" ? "rgba(255,200,0,0.3)" : "rgba(100,255,50,0.3)";
+        const radius = 5;
+
+        // Glow
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, radius + 3, 0, Math.PI * 2);
+        ctx.fillStyle = glowColor;
+        ctx.fill();
+
+        // Main circle
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255,255,255,0.6)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+    }
+}
+function updateSporeClouds() {
+    const now = performance.now();
+    for (let cloud of sporeClouds) {
+        const elapsed = now - cloud.startTime;
+        if (elapsed >= cloud.duration) continue; // will be filtered out
+
+        // Damage enemies inside the cloud
+        for (let i = 0; i < enemies.length; i++) {
+            const enemy = enemies[i];
+            const d = Math.hypot(enemy.x - cloud.x, enemy.y - cloud.y);
+            if (d <= cloud.radius) {
+                const lastHit = cloud.lastDamageTime[i] || 0;
+                if (now - lastHit >= cloud.damageInterval) {
+                    enemy.hp -= cloud.damage;
+                    cloud.lastDamageTime[i] = now;
+                    triggerFlicker(enemy);
+                    spawnHitFeedback(enemy.x, enemy.y - 20, cloud.damage, "#80ff40");
+                    if (enemy.hp <= 0) {
+                        enemy.dead = true;
+                        gold += enemy.goldDrop;
+                        updateUI();
+                    }
+                }
+            }
+        }
+    }
+    enemies = enemies.filter(e => !e.dead);
+    sporeClouds = sporeClouds.filter(c => performance.now() - c.startTime < c.duration);
+}
+
+function drawSporeClouds() {
+    const now = performance.now();
+    for (let cloud of sporeClouds) {
+        const elapsed = now - cloud.startTime;
+        const progress = elapsed / cloud.duration;
+        const alpha = (1 - progress) * 0.45;
+
+        ctx.beginPath();
+        ctx.arc(cloud.x, cloud.y, cloud.radius, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(100, 220, 80, ${alpha})`;
+        ctx.fill();
+        ctx.strokeStyle = `rgba(80, 200, 60, ${alpha * 1.5})`;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    }
+}
 function drawMenu() {
     if (!activeMenu) return;
 
@@ -925,87 +1052,89 @@ function drawMenu() {
         ctx.roundRect(menuX, menuY, MENU_W, MENU_H_SLOT, 6);
         ctx.fill();
         ctx.stroke();
+        
 
         ctx.font = "bold 11px Arial";
         ctx.textAlign = "left";
-        ctx.fillStyle = gold >= 50 ? "#f0f0d8" : "#888";
-        ctx.fillText("⚙ Catapult - 50g", menuX + 10, menuY + MENU_ROW1);
-        ctx.fillStyle = gold >= 30 ? "#f0f0d8" : "#888";
-        ctx.fillText("🏹 Crossbow - 30g", menuX + 10, menuY + MENU_ROW2);
+        const catCost = towerDefs["catapult"][1].cost;
+        const bowCost = towerDefs["crossbow"][1].cost;
+        const sporeCost = towerDefs["sporecap"][1].cost;
+        ctx.fillStyle = gold >= catCost ? "#f0f0d8" : "#888";
+        ctx.fillText(`Catapult - ${catCost}g`, menuX + 10, menuY + MENU_ROW1);
+        ctx.fillStyle = gold >= bowCost ? "#f0f0d8" : "#888";
+        ctx.fillText(`Crossbow - ${bowCost}g`, menuX + 10, menuY + MENU_ROW2);
+        ctx.fillStyle = gold >= sporeCost ? "#f0f0d8" : "#888";
+        ctx.fillText(`Sporecap - ${sporeCost}g`, menuX + 10, menuY + MENU_ROW3);
 
-    } else if (activeMenu.mode === "tower") {
+   } else {
         const tower = towers.find(t => t.col === activeMenu.col && t.row === activeMenu.row);
         if (!tower) return;
+        const menuH = MENU_ROW3 + 15;
+        const menuY = cy - menuH - HEX_SIZE;
+        ctx.fillStyle = "#1a2a1a";
+        ctx.strokeStyle = "#8b6f47";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.roundRect(menuX, menuY, MENU_W, menuH, 6);
+        ctx.fill();
+        ctx.stroke();
 
-        if (activeMenu.scrapConfirm) {
-            const menuH = 60;
-            const menuY = cy - menuH - HEX_SIZE;
-            ctx.fillStyle = "#1a2a1a";
-            ctx.strokeStyle = "#8b6f47";
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.roundRect(menuX, menuY, MENU_W, menuH, 6);
-            ctx.fill();
-            ctx.stroke();
+        const def = towerDefs[tower.type][tower.tier];
+        const maxTier = towerDefs[tower.type].maxTier;
+        const isMaxTier = tower.tier >= maxTier;
+        const nextDef = !isMaxTier ? towerDefs[tower.type][tower.tier + 1] : null;
+        const upgradeCost = nextDef ? nextDef.cost : 0;
+        const canUpgrade = !isMaxTier && gold >= upgradeCost;
+        const refund = Math.floor(towerDefs[tower.type][1].cost * 0.3);
 
-            ctx.font = "bold 11px Arial";
-            ctx.textAlign = "left";
-            ctx.fillStyle = "#ff6060";
-            ctx.fillText("✓ Confirm scrap", menuX + 10, menuY + 24);
-            ctx.fillStyle = "#666";
-            ctx.fillText("click elsewhere to cancel", menuX + 10, menuY + 44);
+        ctx.font = "bold 11px Arial";
+        ctx.textAlign = "left";
 
+        // Row 1: info
+        ctx.fillStyle = "#aaa";
+        ctx.fillText(`${tower.type} T${tower.tier}  DMG:${tower.damage} RNG:${tower.range}`, menuX + 10, menuY + MENU_ROW1);
+
+        // Divider
+        ctx.strokeStyle = "#444";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(menuX + 8, menuY + MENU_ROW1 + 8);
+        ctx.lineTo(menuX + MENU_W - 8, menuY + MENU_ROW1 + 8);
+        ctx.stroke();
+
+        // Row 2: upgrade with preview
+        if (isMaxTier) {
+            ctx.fillStyle = "#555";
+            ctx.fillText("⬆ Max tier", menuX + 10, menuY + MENU_ROW2);
         } else {
-            const menuY = cy - MENU_H_TOWER - HEX_SIZE;
-            ctx.fillStyle = "#1a2a1a";
-            ctx.strokeStyle = "#8b6f47";
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.roundRect(menuX, menuY, MENU_W, MENU_H_TOWER, 6);
-            ctx.fill();
-            ctx.stroke();
-
-            const isCrossbow = tower.type === "crossbow";
-            const upgradeCost = isCrossbow ? 20 : 35;
-            const canUpgrade = tower.tier < 2 && gold >= upgradeCost;
-            const maxTier = tower.tier >= 2;
-            const refund = Math.floor((isCrossbow ? 30 : 50) * 0.3);
-
+            ctx.fillStyle = canUpgrade ? "#f0f0d8" : "#888";
+            ctx.fillText(`⬆ T${tower.tier + 1} - ${upgradeCost}g`, menuX + 10, menuY + MENU_ROW2);
+            // Stat preview
+            ctx.font = "10px Arial";
+            ctx.fillStyle = "#80ff40";
+            ctx.fillText(`DMG:${nextDef.damage} RNG:${nextDef.range}`, menuX + 10, menuY + MENU_ROW2 + 14);
             ctx.font = "bold 11px Arial";
-            ctx.textAlign = "left";
-
-            // Row 1: info
-            ctx.fillStyle = "#aaa";
-            ctx.fillText(`${isCrossbow ? "Crossbow" : "Catapult"} T${tower.tier}  DMG:${tower.damage}`, menuX + 10, menuY + MENU_ROW1);
-
-            // Divider
-            ctx.strokeStyle = "#444";
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(menuX + 8, menuY + MENU_ROW1 + 8);
-            ctx.lineTo(menuX + MENU_W - 8, menuY + MENU_ROW1 + 8);
-            ctx.stroke();
-
-            // Row 2: upgrade
-            ctx.fillStyle = maxTier ? "#555" : canUpgrade ? "#f0f0d8" : "#888";
-            ctx.fillText(maxTier ? "⬆ Max tier" : `⬆ Upgrade - ${upgradeCost}g`, menuX + 10, menuY + MENU_ROW2);
-
-            // Divider
-            ctx.strokeStyle = "#444";
-            ctx.beginPath();
-            ctx.moveTo(menuX + 8, menuY + MENU_ROW2 + 8);
-            ctx.lineTo(menuX + MENU_W - 8, menuY + MENU_ROW2 + 8);
-            ctx.stroke();
-
-            // Row 3: scrap
-            ctx.fillStyle = "#ff9060";
-            ctx.fillText(`🗑 Scrap (+${refund}g)`, menuX + 10, menuY + MENU_ROW3);
         }
+
+        // Divider
+        ctx.strokeStyle = "#444";
+        ctx.beginPath();
+        ctx.moveTo(menuX + 8, menuY + MENU_ROW2 + 22);
+        ctx.lineTo(menuX + MENU_W - 8, menuY + MENU_ROW2 + 22);
+        ctx.stroke();
+
+        // Row 3: scrap
+        ctx.fillStyle = "#ff9060";
+        ctx.fillText(`🗑 Scrap (+${refund}g)`, menuX + 10, menuY + MENU_ROW3);
     }
 }
+
 function drawUpgradeIndicators() {
     for (let tower of towers) {
-        if (tower.tier >= 2) continue;
+        const maxTier = towerDefs[tower.type] ? towerDefs[tower.type].maxTier : 1;
+        if (tower.tier >= maxTier) continue;
+        const nextDef = towerDefs[tower.type][tower.tier + 1];
+        if (!nextDef || gold < nextDef.cost) continue;
 
         const { x: cx, y: cy } = hexToPixel(tower.col, tower.row);
         const plusX = cx + HEX_SIZE * 0.6;
@@ -1065,7 +1194,8 @@ function drawFence() {
     const now = performance.now();
 
     ctx.save();
-    ctx.drawImage(fenceImage, cx - fw / 2, cy - fh, fw, fh);
+    ctx.drawImage(fenceImage, cx - fw / 2, cy - fh + FENCE_ANCHOR_OFFSET, fw, fh);
+
 
     // Flicker
     if (fenceFlicker.active) {
@@ -1099,6 +1229,44 @@ function drawFence() {
 }
 function updateTowers() {
     for (let tower of towers) {
+         // ── Sporecap ──
+        if (tower.type === "sporecap") {
+            const { x: tx, y: ty } = hexToPixel(tower.col, tower.row);
+            const def = towerDefs["sporecap"][tower.tier];
+
+            if (tower.sporeOnCooldown) {
+                if (performance.now() - tower.sporeCooldownStart >= def.cooldown) {
+                    tower.sporeOnCooldown = false;
+                }
+                continue;
+            }
+
+            if (tower.activeCloud) {
+                const elapsed = performance.now() - tower.activeCloud.startTime;
+                if (elapsed >= def.aoeDuration) {
+                    tower.activeCloud = null;
+                    tower.sporeOnCooldown = true;
+                    tower.sporeCooldownStart = performance.now();
+                }
+                continue;
+            }
+
+            const enemyInRange = enemies.some(e => Math.hypot(e.x - tx, e.y - ty) <= tower.range);
+            if (enemyInRange) {
+                const cloud = {
+                    x: tx, y: ty,
+                    radius: def.aoeRadius,
+                    startTime: performance.now(),
+                    duration: def.aoeDuration,
+                    damage: def.damage,
+                    damageInterval: def.aoeDamageInterval,
+                    lastDamageTime: {}
+                };
+                sporeClouds.push(cloud);
+                tower.activeCloud = cloud;
+            }
+            continue;
+        }
         if (tower.cooldown > 0) { tower.cooldown--; tower.target = null; continue; }
 
         const { x: tx, y: ty } = hexToPixel(tower.col, tower.row);
@@ -1169,37 +1337,74 @@ function updateTowers() {
 } 
 
         function drawTowers() {
-            for (let tower of towers) {
-                const { x: cx, y: cy } = hexToPixel(tower.col, tower.row);
-                const isCrossbow = tower.type === "crossbow";
-                const iw = isCrossbow ? 64 : 64;
-                const ih = isCrossbow ? 64 : 94;
-                const offset = isCrossbow ? CROSSBOW_ANCHOR_OFFSET : CATAPULT_ANCHOR_OFFSET;
-                const sprite = isCrossbow ? crossbowImage : catapultImage;
+    for (let tower of towers) {
+        const { x: cx, y: cy } = hexToPixel(tower.col, tower.row);
+        const isCrossbow = tower.type === "crossbow";
+        const isSporecap = tower.type === "sporecap";
 
-                ctx.drawImage(sprite, cx - iw / 2, cy - ih + offset, iw, ih);
-                // Tier 2 outline
-                if (tower.tier === 2) {
-                    const outlineColor = isCrossbow ? "#4488ff" : "#88ccff";
-                    ctx.strokeStyle = outlineColor;
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-                    const corners = hexCorners(cx, cy);
-                    ctx.moveTo(corners[0].x, corners[0].y);
-                    for (let i = 1; i < 6; i++) ctx.lineTo(corners[i].x, corners[i].y);
-                    ctx.closePath();
-                    ctx.stroke();
-                }
-                // Range ring
-                ctx.strokeStyle = isCrossbow
-                    ? "rgba(100, 200, 255, 0.15)"
-                    : "rgba(255, 255, 255, 0.12)";
-                ctx.lineWidth = 1;
-                ctx.beginPath();
-                ctx.arc(cx, cy, tower.range, 0, Math.PI * 2);
-                ctx.stroke();
-            }
+        let sprite, iw, ih, offset;
+        if (isSporecap) {
+            sprite = sporecapImage;
+            iw = HEX_SIZE * 1.4;
+            ih = HEX_SIZE * 1.6;
+            offset = SPORECAP_ANCHOR_OFFSET;
+        } else if (isCrossbow) {
+            sprite = crossbowImage;
+            iw = HEX_SIZE * 1.3;
+            ih = HEX_SIZE * 1.5;
+            offset = CROSSBOW_ANCHOR_OFFSET;
+        } else {
+            sprite = catapultImage;
+            iw = HEX_SIZE * 1.5;
+            ih = HEX_SIZE * 1.8;
+            offset = CATAPULT_ANCHOR_OFFSET;
         }
+
+        ctx.drawImage(sprite, cx - iw / 2, cy - ih + offset, iw, ih);
+
+        // Tier outline + digit (tier > 1)
+        if (tower.tier > 1) {
+            const tierColors = ["", "#88ccff", "#4488ff", "#ff8800", "#ffd700"];
+            const outlineColor = tierColors[tower.tier] || "#ffd700";
+            ctx.strokeStyle = outlineColor;
+            ctx.lineWidth = 2;
+            const corners = hexCorners(cx, cy);
+            ctx.beginPath();
+            ctx.moveTo(corners[0].x, corners[0].y);
+            for (let i = 1; i < 6; i++) ctx.lineTo(corners[i].x, corners[i].y);
+            ctx.closePath();
+            ctx.stroke();
+
+            ctx.font = "bold 9px Arial";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillStyle = outlineColor;
+            ctx.fillText(tower.tier, cx, cy + HEX_SIZE * 0.62);
+        }
+
+        // Range ring — only for non-sporecap or show spore range differently
+        if (isSporecap) {
+            ctx.strokeStyle = "rgba(100,220,80,0.15)";
+        } else {
+            ctx.strokeStyle = isCrossbow ? "rgba(100,200,255,0.15)" : "rgba(255,255,255,0.12)";
+        }
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(cx, cy, tower.range, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Shot line for catapult/crossbow only
+        if (!isSporecap && tower.target && !tower.target.dead) {
+            ctx.strokeStyle = "yellow";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(tower.target.x, tower.target.y);
+            ctx.stroke();
+            ctx.lineWidth = 1;
+        }
+    }
+}
         function updateBullets() {
             for (let bullet of bullets) {
                 const dx = bullet.tx - bullet.x;
@@ -1314,6 +1519,7 @@ function updateTowers() {
         function drawGrid() {
             for (let row = 0; row < GRID_ROWS; row++) {
                 for (let col = 0; col < GRID_COLS; col++) {
+                    if (!isInHexGrid(col, row)) continue;
                     const { x, y } = hexToPixel(col, row);
                     let color = "#355e3b"; // forest
                     if (isPathHex(col, row)) color = "#9b7653"; // path
@@ -1337,7 +1543,6 @@ function updateTowers() {
         function updateSkillUI() {
             drawSkillTimer(molotovCanvas, "molotov", molotovIcon);
             drawSkillTimer(acidCanvas, "acid", acidIcon);
-            console.log("skillDefs:", skillDefs);
         }
 
         function drawSkillTimer(timerCanvas, skillName, icon) {
@@ -1402,15 +1607,20 @@ function updateTowers() {
             updateTowers();
             updateBullets();
             updateSplashes();
+            updateSporeClouds(); 
+            updateProjectiles(); 
             updateFloatingNumbers();
 
             drawGrid();
+            drawTileIDs();
             drawElias();
             drawFence();
+            drawSporeClouds(); 
             drawTowers();
             drawUpgradeIndicators(); 
             drawSplashes();
             drawBullets();
+            drawProjectiles();  
             drawEnemies();
             drawMenu();
             drawFloatingNumbers();
