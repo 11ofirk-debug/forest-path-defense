@@ -502,7 +502,7 @@ function spawnEnemy() {
     });
 }
 
-function updateEnemies() {
+function updateEnemies(dt) {
     const now = performance.now();
     const lastTile = path[path.length - 1];
     const fencePixel = hexToPixel(lastTile.col, lastTile.row);
@@ -804,7 +804,7 @@ canvas.addEventListener("click", (event) => {
         fenceFlicker = { active: false, start: 0 };
         lastFrameTime = null;
         updateUI();
-        gameLoop();
+        requestAnimationFrame(gameLoop);
         return;
     }
     // If a menu is open, check if click is inside it
@@ -1231,7 +1231,7 @@ function drawFence() {
     ctx.textAlign = "center";
     ctx.fillText(`${fence.hp}/${fence.maxHp}`, cx, barY - 2);
 }
-function updateTowers() {
+function updateTowers(dt) {
     for (let tower of towers) {
          // ── Sporecap ──
         if (tower.type === "sporecap") {
@@ -1651,6 +1651,6 @@ function updateTowers() {
         loadLevelData().then(success => {
             if (success) {
                 updateUI();
-                gameLoop();
+                requestAnimationFrame(gameLoop);
             }
         });
