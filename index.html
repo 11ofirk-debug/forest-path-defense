@@ -1,20 +1,26 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Forest Path Defense</title>
+    <h1 style="font-size: 16px;">Forest Path Defense</h1>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-    <h1>Forest Path Defense</h1>
     <p>Wave: <span id="wave">1</span></p>
     <div id="gameContainer">
         <canvas id="gameCanvas"></canvas>
 
         <div id="sidePanel">
-            <h2>Base</h2>
             <p>Fence HP: <span id="lives">30</span></p>
-            <p>Gold: <span id="gold">100</span></p>
+            <hr>
+           <h2>Resources</h2>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; font-size:12px; align-items:center;">
+                    <div style="display:flex; align-items:center; gap:6px;"><img src="images/goldIcon.png" width="32" height="32"> <span id="gold" style="font-family:monospace">100</span></div>
+                    <div style="display:flex; align-items:center; gap:6px;"><img src="images/RocksIcon.png" width="32" height="32"> <span id="res-rock" style="font-family:monospace">0</span></div>
+                    <div style="display:flex; align-items:center; gap:6px;"><img src="images/woodIcon.png" width="32" height="32"> <span id="res-wood" style="font-family:monospace">0</span></div>
+                    <div style="display:flex; align-items:center; gap:6px;"><img src="images/ropeIcon.png" width="32" height="32"> <span id="res-rope" style="font-family:monospace">0</span></div>
+                    <div style="display:flex; align-items:center; gap:6px;"><img src="images/metalIcon.png" width="32" height="32"> <span id="res-steel" style="font-family:monospace">0</span></div>
+                </div>
 
             <hr>
 
@@ -25,11 +31,11 @@
             <p style="font-size:11px; color:#aaa; margin-bottom:8px;">Press 1 or 2 then click the canvas to activate</p>
             <div style="display:flex; gap:10px; margin-top:8px;">
                 <div style="text-align:center;">
-                    <canvas id="molotovTimer" width="60" height="80"></canvas>
+                    <canvas id="molotovTimer" width="60" height="60"></canvas>
                     <div style="font-size:11px; margin-top:4px;">1 - Molotov</div>
                 </div>
                 <div style="text-align:center;">
-                    <canvas id="acidTimer" width="60" height="80"></canvas>
+                    <canvas id="acidTimer" width="60" height="60"></canvas>
                     <div style="font-size:11px; margin-top:4px;">2 - Acid</div>
                 </div>
             </div>
