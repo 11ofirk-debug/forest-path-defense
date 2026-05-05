@@ -94,10 +94,10 @@ async function loadLevelData() {
         enemyDefs = {};
         for (const row of byTab.enemies) {
             enemyDefs[row.type] = {
-                speed: parseFloat(row.speed),
-                hp: parseFloat(row.hp),
-                damage: parseFloat(row.damage),
-                goldDrop: parseFloat(row.goldDrop)
+                speed:    parseFloat(row.speed),
+                hp:       parseFloat(row.hp),
+                damage:   parseFloat(row.damage),
+                drops:    parseDrops(row.drops)
             };
         }
     } catch (e) {
@@ -113,7 +113,7 @@ try {
         const tier = parseInt(row.tier);
         if (!towerDefs[type]) towerDefs[type] = { maxTier: 0 };
         towerDefs[type][tier] = {
-            cost:              parseFloat(row.cost) || 0,
+            cost:              parseCosts(row.cost),  // ← now an object
             damage:            parseFloat(row.damage) || 0,
             fireRate:          parseFloat(row.fireRate) || 0,
             range:             parseFloat(row.range) || 0,
@@ -212,6 +212,23 @@ const acidIcon = new Image();
 acidIcon.src = "images/acid.png";
 const sporecapImage = new Image();
 sporecapImage.src = "images/sporecap.png";
+const goldIcon = new Image();
+goldIcon.src = "images/goldIcon.png";
+const rocksIcon = new Image();
+rocksIcon.src = "images/RocksIcon.png";
+const woodIcon = new Image();
+woodIcon.src = "images/woodIcon.png";
+const metalIcon = new Image();
+metalIcon.src = "images/metalIcon.png";
+const ropeIcon = new Image();
+ropeIcon.src = "images/ropeIcon.png";
+const resourceIcons = {
+    gold: goldIcon,
+    rock: rocksIcon,
+    wood: woodIcon,
+    steel: metalIcon,
+    rope: ropeIcon
+};
 // Anchor offsets — raise sprite by this many px to compensate for transparent padding
 const LUMBERJACK_ANCHOR_OFFSET = 12;  
 const CATAPULT_ANCHOR_OFFSET = 12;  
@@ -230,14 +247,23 @@ const goldDisplay = document.getElementById("gold");
 const waveDisplay = document.getElementById("wave");
 const messageDisplay = document.getElementById("message");
 
-const MENU_W = 140;
-const MENU_ROW1 = 24; // info text
-const MENU_ROW2 = 52; // upgrade text  
-const MENU_ROW3 = 80; // scrap text
-const MENU_H_TOWER = 95;
-const MENU_H_SLOT = 110;
+const MENU_W = 165;
+const MENU_ROW1 = 24;  // info text
+const MENU_ROW2 = 52;  // upgrade text
+const MENU_ROW3 = 106; // scrap text (was 80 — needs room for cost list + stat preview)
+const MENU_H_TOWER = 125;
+const MENU_H_SLOT = 150;
 const MAX_FENCE_HP = 30;
 
+// Target Y for drop animations — middle of the sidebar
+// We'll calculate this dynamically from the sidebar element
+function getSidebarMidY() {
+    const panel = document.getElementById("sidePanel");
+    const rect = panel.getBoundingClientRect();
+    const canvasRect = canvas.getBoundingClientRect();
+    return (rect.top + rect.height / 2) - canvasRect.top;
+}
+const DROP_ANIM_TARGET_Y_OFFSET = -100;
 
 // ─── GAME STATE ───────────────────────────────────────────────────────────────
 let fence = {
@@ -248,7 +274,13 @@ let fence = {
 let fenceFlicker = { active: false, start: 0 };
 let gameOver = false;
 let gameWon = false;
-let gold = 100;
+let resources = {
+    gold: 100, 
+    rope: 0,
+    wood: 0,
+    rock: 0,
+    steel: 0
+};
 let wave = 1;
 let bullets = [];
 let activeMenu = null; // { col, row, mode } mode = "slot" or "tower"
@@ -273,6 +305,7 @@ let towerDefs = {};
 let waveDefs = [];
 let floatingNumbers = [];
 let sporeClouds = [];
+let dropAnimations = [];
 
 let skillDefs = {};
 let activeSkills = {
@@ -496,7 +529,6 @@ function spawnEnemy() {
         hp: def.hp,
         maxHp: def.hp,
         damage: def.damage,
-        goldDrop: def.goldDrop,
         type: isWarden ? "warden" : "lumberjack",
         dead: false,
         dirX: 1
@@ -509,8 +541,14 @@ function updateEnemies(dt) {
     const fencePixel = hexToPixel(lastTile.col, lastTile.row);
 
     for (let enemy of enemies) {
-        // Skip already-dead enemies
+        // Skip already-dead or dying enemies
         if (enemy.dead) continue;
+        if (enemy.dying) {
+            if (performance.now() - enemy.dyingStart >= enemy.dyingDuration) {
+                enemy.dead = true;
+            }
+            continue;
+        }
 
         // If already attacking fence, handle attack logic
         if (enemy.attackingFence) {
@@ -652,6 +690,34 @@ function drawEnemies() {
                 }
             }
         }
+        if (enemy.dying) {
+            const elapsed = performance.now() - enemy.dyingStart;
+            const progress = elapsed / enemy.dyingDuration; // 0 → 1
+
+            // Scale: 1 → 1.5 in first 30%, then 1.5 → 0 in remaining 70%
+            let scale;
+            if (progress < 0.3) {
+                scale = 1 + (progress / 0.3) * 0.5; // 1 → 1.5
+            } else {
+                scale = 1.5 * (1 - (progress - 0.3) / 0.7); // 1.5 → 0
+            }
+
+            const centerX = enemy.x;
+            const centerY = enemy.y - sh / 2 + offset;
+
+            ctx.save();
+            ctx.translate(centerX, centerY);
+            ctx.scale(scale, scale);
+            if (enemy.dirX < 0) {
+                ctx.scale(-1, 1);
+                ctx.drawImage(sprite, -sw / 2, -sh / 2, sw, sh);
+            } else {
+                ctx.drawImage(sprite, -sw / 2, -sh / 2, sw, sh);
+            }
+            ctx.restore(); // inner (translate/scale)
+            ctx.restore(); // outer (from line 646)
+            continue;
+        }
 
         if (enemy.dirX < 0) {
             ctx.scale(-1, 1);
@@ -667,6 +733,48 @@ function drawEnemies() {
         ctx.fillStyle = isWarden ? "orange" : "lime";
         ctx.fillRect(drawX, drawY - 6, sw * (enemy.hp / enemy.maxHp), 4);
     }
+}
+function parseDrops(dropsStr) {
+    if (!dropsStr) return [];
+    return dropsStr.split("|").map(entry => {
+        const parts = entry.trim().split(":");
+        const type = parts[0].trim();
+        const chance = parseFloat(parts[1]) / 100;
+        const rangeParts = parts[2].split("-");
+        const min = parseInt(rangeParts[0]);
+        const max = parseInt(rangeParts[1] !== undefined ? rangeParts[1] : rangeParts[0]);
+        return { type, chance, min, max };
+    });
+}
+function parseCosts(costStr) {
+    if (!costStr) return {};
+    const result = {};
+    costStr.split("|").forEach(entry => {
+        const parts = entry.trim().split(":");
+        const resource = parts[0].trim();
+        const amount = parseFloat(parts[1]);
+        if (resource && !isNaN(amount)) result[resource] = amount;
+    });
+    return result;
+}
+
+function rollDrops(drops) {
+    const result = {};
+    for (let drop of drops) {
+        if (Math.random() < drop.chance) {
+            const amount = drop.min + Math.floor(Math.random() * (drop.max - drop.min + 1));
+            result[drop.type] = (result[drop.type] || 0) + amount;
+        }
+    }
+    return result;
+}
+function grantDrops(drops) {
+    for (let [type, amount] of Object.entries(drops)) {
+        if (resources.hasOwnProperty(type)) {
+            resources[type] += amount;
+        }
+    }
+    updateUI();
 }
 //---------- floating damage numbers and hit feedback ----------
 function spawnHitFeedback(x, y, amount, color) {
@@ -715,8 +823,10 @@ function drawFloatingNumbers() {
 
 canvas.addEventListener("click", (event) => {
     const rect = canvas.getBoundingClientRect();
-    const px = event.clientX - rect.left;
-    const py = event.clientY - rect.top;
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const px = (event.clientX - rect.left) * scaleX;
+    const py = (event.clientY - rect.top) * scaleY;
     // Check if clicking a plus upgrade icon
     
     for (let tower of towers) {
@@ -728,8 +838,8 @@ canvas.addEventListener("click", (event) => {
         if (Math.hypot(px - plusX, py - plusY) <= 10) {
             const nextDef = towerDefs[tower.type][tower.tier + 1];
             const upgradeCost = nextDef.cost;
-            if (gold >= upgradeCost) {
-                gold -= upgradeCost;
+            if (canAfford(upgradeCost)) {
+                spendResources(upgradeCost);
                 tower.tier++;
                 tower.damage   = nextDef.damage;
                 tower.range    = nextDef.range;
@@ -737,7 +847,7 @@ canvas.addEventListener("click", (event) => {
                 messageDisplay.innerText = `${tower.type} upgraded to T${tower.tier}!`;
                 updateUI();
             } else {
-                messageDisplay.innerText = "Not enough gold!";
+                messageDisplay.innerText = "Not enough resources!";
             }
             return;
         }
@@ -784,17 +894,18 @@ canvas.addEventListener("click", (event) => {
         gameWon = false;
         enemies = [];
         towers = [];
+        dropAnimations = [];
         sporeClouds = [];
         bullets = [];
         splashes = [];
         projectiles = [];
+        resources = { gold: 200, rope: 0, wood: 0, rock: 0, steel: 0 };
         wave = 1;
         enemiesToSpawn = 0;
         spawnTimer = 0;
         spawnCount = 0;
         betweenWaves = true;
         waveTimer = 180;
-        gold = 100;
         activeMenu = null;
         activeSkills = {
             molotov: { cooldownStart: performance.now(), ready: false },
@@ -818,24 +929,24 @@ canvas.addEventListener("click", (event) => {
             if (px >= menuX && px <= menuX + MENU_W && py >= menuY && py <= menuY + MENU_H_SLOT) {
                 const relY = py - menuY;
                 let type, extraProps = {};
-                if (relY < (MENU_ROW1 + MENU_ROW2) / 2) {
+                if (relY < MENU_H_SLOT / 3) {
                     type = "catapult";
-                } else if (relY < (MENU_ROW2 + MENU_ROW3) / 2) {
+                } else if (relY < (MENU_H_SLOT / 3) * 2) {
                     type = "crossbow";
                 } else {
                     type = "sporecap";
                     extraProps = { activeCloud: null, sporeOnCooldown: false };
                 }
                 const def = towerDefs[type][1];
-                if (gold >= def.cost) {
+                if (canAfford(def.cost)) {
                     towers.push({ type, col: activeMenu.col, row: activeMenu.row,
                         range: def.range, damage: def.damage, fireRate: def.fireRate,
                         cooldown: 0, tier: 1, target: null, ...extraProps });
-                    gold -= def.cost;
+                    spendResources(def.cost);
                     messageDisplay.innerText = `${type.charAt(0).toUpperCase() + type.slice(1)} placed!`;
                     updateUI();
                 } else {
-                    messageDisplay.innerText = "Not enough gold!";
+                    messageDisplay.innerText = "Not enough resources!";
                 }
             }
             activeMenu = null;
@@ -855,8 +966,8 @@ canvas.addEventListener("click", (event) => {
                             messageDisplay.innerText = "Already max tier!";
                         } else {
                             const nextDef = towerDefs[tower.type][tower.tier + 1];
-                            if (gold >= nextDef.cost) {
-                                gold -= nextDef.cost;
+                            if (canAfford(nextDef.cost)) {
+                                spendResources(nextDef.cost);
                                 tower.tier++;
                                 tower.damage   = nextDef.damage;
                                 tower.range    = nextDef.range;
@@ -864,12 +975,13 @@ canvas.addEventListener("click", (event) => {
                                 messageDisplay.innerText = `${tower.type} upgraded to T${tower.tier}!`;
                                 updateUI();
                             } else {
-                                messageDisplay.innerText = "Not enough gold!";
+                                messageDisplay.innerText = "Not enough resources!";
                             }
                         }
                     } else if (relY >= (MENU_ROW2 + MENU_ROW3) / 2) {
-                        const refund = Math.floor(towerDefs[tower.type][1].cost * 0.3);
-                        gold += refund;
+                       const placementCost = towerDefs[tower.type][1].cost;
+                        const refund = Math.floor((placementCost.gold || 0) * 0.3);
+                        resources.gold += refund;
                         towers = towers.filter(t => t !== tower);
                         messageDisplay.innerText = `Scrapped! (+${refund}g)`;
                         updateUI();
@@ -898,8 +1010,10 @@ canvas.addEventListener("click", (event) => {
 });
 canvas.addEventListener("mousemove", (event) => {
     const rect = canvas.getBoundingClientRect();
-    mousePos.x = event.clientX - rect.left;
-    mousePos.y = event.clientY - rect.top;
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    mousePos.x = (event.clientX - rect.left) * scaleX;
+    mousePos.y = (event.clientY - rect.top) * scaleY;
 });
 window.addEventListener("keydown", (e) => {
     if (gameOver || gameWon) return;
@@ -952,8 +1066,8 @@ function updateProjectiles() {
                     triggerFlicker(enemy);
                     spawnHitFeedback(enemy.x, enemy.y - 20, def.damage, "#ffd700");
                     if (enemy.hp <= 0) {
-                        enemy.dead = true;
-                        gold += enemy.goldDrop;
+                killEnemy(enemy);
+                        grantDrops(rollDrops(enemyDefs[enemy.type].drops));
                         updateUI();
                     }
                 }
@@ -1014,8 +1128,8 @@ function updateSporeClouds() {
                     triggerFlicker(enemy);
                     spawnHitFeedback(enemy.x, enemy.y - 20, cloud.damage, "#80ff40");
                     if (enemy.hp <= 0) {
-                        enemy.dead = true;
-                        gold += enemy.goldDrop;
+                        killEnemy(enemy);
+                        grantDrops(rollDrops(enemyDefs[enemy.type].drops));
                         updateUI();
                     }
                 }
@@ -1042,6 +1156,36 @@ function drawSporeClouds() {
         ctx.stroke();
     }
 }
+function canAfford(cost) {
+    for (let [resource, amount] of Object.entries(cost)) {
+        if ((resources[resource] || 0) < amount) return false;
+    }
+    return true;
+}
+
+function spendResources(cost) {
+    for (let [resource, amount] of Object.entries(cost)) {
+        resources[resource] = (resources[resource] || 0) - amount;
+    }
+    updateUI();
+}
+function drawCostList(cost, x, y) {
+    let offsetX = 0;
+    for (let [resource, amount] of Object.entries(cost)) {
+        const canPay = (resources[resource] || 0) >= amount;
+        const icon = resourceIcons[resource];
+        if (icon) {
+            ctx.drawImage(icon, x + offsetX, y - 10, 14, 14);
+            offsetX += 16;
+        }
+        ctx.fillStyle = canPay ? "#80ff40" : "#ff4444";
+        ctx.font = "10px Arial";
+        ctx.textAlign = "left";
+        ctx.fillText(`${amount}`, x + offsetX, y);
+        offsetX += 20;
+    }
+}
+
 function drawMenu() {
     if (!activeMenu) return;
 
@@ -1061,15 +1205,21 @@ function drawMenu() {
 
         ctx.font = "bold 11px Arial";
         ctx.textAlign = "left";
-        const catCost = towerDefs["catapult"][1].cost;
-        const bowCost = towerDefs["crossbow"][1].cost;
-        const sporeCost = towerDefs["sporecap"][1].cost;
-        ctx.fillStyle = gold >= catCost ? "#f0f0d8" : "#888";
-        ctx.fillText(`Catapult - ${catCost}g`, menuX + 10, menuY + MENU_ROW1);
-        ctx.fillStyle = gold >= bowCost ? "#f0f0d8" : "#888";
-        ctx.fillText(`Crossbow - ${bowCost}g`, menuX + 10, menuY + MENU_ROW2);
-        ctx.fillStyle = gold >= sporeCost ? "#f0f0d8" : "#888";
-        ctx.fillText(`Sporecap - ${sporeCost}g`, menuX + 10, menuY + MENU_ROW3);
+        // Catapult
+        ctx.fillStyle = "#f0f0d8";
+        ctx.font = "bold 11px Arial";
+        ctx.fillText("⚙ Catapult", menuX + 10, menuY + MENU_ROW1);
+        drawCostList(towerDefs["catapult"][1].cost, menuX + 10, menuY + MENU_ROW1 + 14);
+
+        // Crossbow
+        ctx.fillStyle = "#f0f0d8";
+        ctx.fillText("🏹 Crossbow", menuX + 10, menuY + MENU_ROW2);
+        drawCostList(towerDefs["crossbow"][1].cost, menuX + 10, menuY + MENU_ROW2 + 14);
+
+        // Sporecap
+        ctx.fillStyle = "#f0f0d8";
+        ctx.fillText("🍄 Sporecap", menuX + 10, menuY + MENU_ROW3);
+        drawCostList(towerDefs["sporecap"][1].cost, menuX + 10, menuY + MENU_ROW3 + 14);
 
    } else {
         const tower = towers.find(t => t.col === activeMenu.col && t.row === activeMenu.row);
@@ -1088,9 +1238,8 @@ function drawMenu() {
         const maxTier = towerDefs[tower.type].maxTier;
         const isMaxTier = tower.tier >= maxTier;
         const nextDef = !isMaxTier ? towerDefs[tower.type][tower.tier + 1] : null;
-        const upgradeCost = nextDef ? nextDef.cost : 0;
-        const canUpgrade = !isMaxTier && gold >= upgradeCost;
-        const refund = Math.floor(towerDefs[tower.type][1].cost * 0.3);
+        const canUpgrade = !isMaxTier && canAfford(nextDef.cost);
+        const refund = Math.floor((towerDefs[tower.type][1].cost.gold || 0) * 0.3);
 
         ctx.font = "bold 11px Arial";
         ctx.textAlign = "left";
@@ -1113,19 +1262,21 @@ function drawMenu() {
             ctx.fillText("⬆ Max tier", menuX + 10, menuY + MENU_ROW2);
         } else {
             ctx.fillStyle = canUpgrade ? "#f0f0d8" : "#888";
-            ctx.fillText(`⬆ T${tower.tier + 1} - ${upgradeCost}g`, menuX + 10, menuY + MENU_ROW2);
+            ctx.fillText(`⬆ T${tower.tier + 1}`, menuX + 10, menuY + MENU_ROW2);
+            // Resource cost indicators
+            drawCostList(nextDef.cost, menuX + 10, menuY + MENU_ROW2 + 14);
             // Stat preview
             ctx.font = "10px Arial";
             ctx.fillStyle = "#80ff40";
-            ctx.fillText(`DMG:${nextDef.damage} RNG:${nextDef.range}`, menuX + 10, menuY + MENU_ROW2 + 14);
+            ctx.fillText(`DMG:${nextDef.damage} RNG:${nextDef.range}`, menuX + 10, menuY + MENU_ROW2 + 26);
             ctx.font = "bold 11px Arial";
         }
 
         // Divider
         ctx.strokeStyle = "#444";
         ctx.beginPath();
-        ctx.moveTo(menuX + 8, menuY + MENU_ROW2 + 22);
-        ctx.lineTo(menuX + MENU_W - 8, menuY + MENU_ROW2 + 22);
+        ctx.moveTo(menuX + 8, menuY + MENU_ROW2 + 40);
+        ctx.lineTo(menuX + MENU_W - 8, menuY + MENU_ROW2 + 40);
         ctx.stroke();
 
         // Row 3: scrap
@@ -1139,7 +1290,7 @@ function drawUpgradeIndicators() {
         const maxTier = towerDefs[tower.type] ? towerDefs[tower.type].maxTier : 1;
         if (tower.tier >= maxTier) continue;
         const nextDef = towerDefs[tower.type][tower.tier + 1];
-        if (!nextDef || gold < nextDef.cost) continue;
+        if (!canAfford(nextDef.cost)) continue;
 
         const { x: cx, y: cy } = hexToPixel(tower.col, tower.row);
         const plusX = cx + HEX_SIZE * 0.6;
@@ -1188,6 +1339,22 @@ function drawUpgradeIndicators() {
             ctx.textAlign = "center";
             ctx.fillText(tipText, plusX, tipY + 15);
         }
+    }
+}
+function drawCostList(cost, x, y) {
+    let offsetX = 0;
+    for (let [resource, amount] of Object.entries(cost)) {
+        const canPay = (resources[resource] || 0) >= amount;
+        const icon = resourceIcons[resource];
+        if (icon) {
+            ctx.drawImage(icon, x + offsetX, y - 10, 14, 14);
+            offsetX += 16;
+        }
+        ctx.fillStyle = canPay ? "#80ff40" : "#ff4444";
+        ctx.font = "10px Arial";
+        ctx.textAlign = "left";
+        ctx.fillText(`${amount}`, x + offsetX, y);
+        offsetX += 20;
     }
 }
 
@@ -1278,6 +1445,7 @@ function updateTowers(dt) {
         let closest = null, closestDist = Infinity;
 
         for (let enemy of enemies) {
+            if (enemy.dying) continue; // ← add this
             const d = Math.hypot(enemy.x - tx, enemy.y - ty);
             if (d <= tower.range && d < closestDist) {
                 closest = enemy;
@@ -1307,9 +1475,7 @@ function updateTowers(dt) {
                         triggerFlicker(other);
                         spawnHitFeedback(other.x, other.y - 20, splashDmg, "#ff8800");
                         if (other.hp <= 0) {
-                            other.dead = true;
-                            gold += other.goldDrop;
-                            updateUI();
+                            killEnemy(other);
                         }
                     }
                 }
@@ -1331,10 +1497,8 @@ function updateTowers(dt) {
                 done: false
             });
 
-             if (closest.hp <= 0) {
-                closest.dead = true;
-                gold += closest.goldDrop;
-                updateUI();
+            if (closest.hp <= 0) {
+                killEnemy(closest);
             }
         } 
     } 
@@ -1477,6 +1641,86 @@ function updateTowers(dt) {
                 ctx.stroke();
             }
         }
+        function killEnemy(enemy) {
+            if (enemy.dying || enemy.dead) return;
+            enemy.dying = true;
+            enemy.dyingStart = performance.now();
+            enemy.dyingDuration = 400;
+
+            const drops = rollDrops(enemyDefs[enemy.type].drops);
+            grantDrops(drops);
+            updateUI();
+
+            // Spawn drop animations
+            const startX = enemy.x;
+            const startY = enemy.y + 20;
+            let delay = 0;
+            let offsetIndex = 0;
+            for (let [type, amount] of Object.entries(drops)) {
+                if (amount > 0 && resourceIcons[type]) {
+                    const spreadX = (offsetIndex - Object.keys(drops).length / 2) * 28; // spread horizontally
+                    dropAnimations.push({
+                        type,
+                        amount,
+                        x: startX + spreadX,
+                        y: startY,
+                        startX: startX + spreadX,
+                        startY,
+                        startTime: performance.now() + delay,
+                        duration: 600,
+                        done: false
+                    });
+                    delay += 80;
+                    offsetIndex++;
+                }
+            }
+        }
+        function updateDropAnimations() {
+            const now = performance.now();
+            dropAnimations = dropAnimations.filter(d => !d.done);
+            for (let anim of dropAnimations) {
+                if (now < anim.startTime) continue; // not started yet
+                const elapsed = now - anim.startTime;
+                if (elapsed >= anim.duration) {
+                    anim.done = true;
+                    continue;
+                }
+                const t = elapsed / anim.duration;
+                // Ease out — fast at start, slow at end
+                const eased = t * t;
+                const targetY = getSidebarMidY() + DROP_ANIM_TARGET_Y_OFFSET;
+                const targetX = canvas.width + 20;
+                anim.x = anim.startX + (targetX - anim.startX) * eased;
+                anim.y = anim.startY + (targetY - anim.startY) * eased;
+            }
+        }
+
+        function drawDropAnimations() {
+            const now = performance.now();
+            for (let anim of dropAnimations) {
+                if (now < anim.startTime) continue;
+                const elapsed = now - anim.startTime;
+                const t = Math.min(elapsed / anim.duration, 1);
+                const alpha = t < 0.8 ? 1 : 1 - (t - 0.8) / 0.2; // fade out last 20%
+
+                const icon = resourceIcons[anim.type];
+                const size = 48;
+
+                ctx.save();
+                ctx.globalAlpha = alpha;
+                ctx.drawImage(icon, anim.x - size / 2, anim.y - size / 2, size, size);
+
+                // Amount label
+                ctx.font = "bold 10px Arial";
+                ctx.textAlign = "left";
+                ctx.fillStyle = "#fff";
+                ctx.strokeStyle = "rgba(0,0,0,0.6)";
+                ctx.lineWidth = 2;
+                ctx.strokeText(`+${anim.amount}`, anim.x + size / 2 - 2, anim.y + 4);
+                ctx.fillText(`+${anim.amount}`, anim.x + size / 2 - 2, anim.y + 4);
+                ctx.restore();
+            }
+        }
         function drawRestartButton() {
             const cx = canvas.width / 2;
             const cy = canvas.height / 2;
@@ -1536,10 +1780,14 @@ function updateTowers(dt) {
         }
 
         // ─── UI ───────────────────────────────────────────────────────────────────────
-        function updateUI() {
+         function updateUI() {
             livesDisplay.innerText = fence.hp;
-            goldDisplay.innerText = gold;
-            waveDisplay.innerText = `${wave}/${waveDefs.length}`;
+            goldDisplay.innerText  = resources.gold;
+            waveDisplay.innerText  = `${wave}/${waveDefs.length}`;
+            document.getElementById("res-rock").innerText  = resources.rock;
+            document.getElementById("res-wood").innerText  = resources.wood;
+            document.getElementById("res-rope").innerText  = resources.rope;
+            document.getElementById("res-steel").innerText = resources.steel;
         }
         const molotovCanvas = document.getElementById("molotovTimer");
         const acidCanvas = document.getElementById("acidTimer");
@@ -1618,6 +1866,7 @@ function updateTowers(dt) {
             updateSporeClouds(); 
             updateProjectiles(); 
             updateFloatingNumbers();
+            updateDropAnimations();
 
             drawGrid();
             drawTileIDs();
@@ -1632,9 +1881,11 @@ function updateTowers(dt) {
             drawEnemies();
             drawMenu();
             drawFloatingNumbers();
+            
 
             ctx.restore();
             updateUI();
+            drawDropAnimations();
             if (Object.keys(skillDefs).length > 0) {
                 updateSkillUI();
             }
