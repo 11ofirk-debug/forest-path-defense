@@ -38,8 +38,19 @@ function showLoadError(message) {
     ctx.fillText("Check your Google Sheet is published and tab names are correct.", canvas.width / 2, canvas.height / 2 + 35);
 }
 
+const CACHE_KEY = "fpd_levelData";
+const CACHE_TTL = 60 * 60 * 1000; // 1 hour
+
 async function loadLevelData() {
     const tabs = ["path", "slots", "enemies", "towers", "waves", "activeSkills"];
+
+    // Try cache first
+    try {
+        const cached = JSON.parse(localStorage.getItem(CACHE_KEY));
+        if (cached && Date.now() - cached.ts < CACHE_TTL) {
+            return applyLevelData(cached.byTab);
+        }
+    } catch (_) {}
 
     let results;
     try {
@@ -63,8 +74,14 @@ async function loadLevelData() {
             return false;
         }
         byTab[tab] = data;
-
     }
+
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), byTab })); } catch (_) {}
+
+    return applyLevelData(byTab);
+}
+
+function applyLevelData(byTab) {
     // ── Path ──
     try {
         path.length = 0;
@@ -106,38 +123,43 @@ async function loadLevelData() {
     }
 
     // ── Towers ──
-try {
-    towerDefs = {};
-    for (const row of byTab.towers) {
-        const type = row.type;
-        const tier = parseInt(row.tier);
-        if (!towerDefs[type]) towerDefs[type] = { maxTier: 0 };
-        towerDefs[type][tier] = {
-            cost:              parseCosts(row.cost),  // ← now an object
-            damage:            parseFloat(row.damage) || 0,
-            fireRate:          parseFloat(row.fireRate) || 0,
-            range:             parseFloat(row.range) || 0,
-            aoeRadius:         parseFloat(row.aoeRadius) || 0,
-            aoeDuration:       parseFloat(row.aoeDuration) || 0,
-            aoeDamageInterval: parseFloat(row.aoeDamageInterval) || 0,
-            cooldown:          parseFloat(row.cooldown) || 0
-        };
-        if (tier > towerDefs[type].maxTier) towerDefs[type].maxTier = tier;
+    try {
+        towerDefs = {};
+        for (const row of byTab.towers) {
+            const type = row.type;
+            const tier = parseInt(row.tier);
+            if (!towerDefs[type]) towerDefs[type] = { maxTier: 0 };
+            towerDefs[type][tier] = {
+                cost:              parseCosts(row.cost),
+                damage:            parseFloat(row.damage) || 0,
+                fireRate:          parseFloat(row.fireRate) || 0,
+                range:             parseFloat(row.range) || 0,
+                aoeRadius:         parseFloat(row.aoeRadius) || 0,
+                aoeDuration:       parseFloat(row.aoeDuration) || 0,
+                aoeDamageInterval: parseFloat(row.aoeDamageInterval) || 0,
+                cooldown:          parseFloat(row.cooldown) || 0
+            };
+            if (tier > towerDefs[type].maxTier) towerDefs[type].maxTier = tier;
+        }
+    } catch(e) {
+        showLoadError("Error parsing towers tab: " + e.message);
+        return false;
     }
-} catch(e) {
-    showLoadError("Error parsing towers tab: " + e.message);
-    return false;
-}
 
     // ── Waves ──
     try {
-        waveDefs = byTab.waves.map(row => ({
-            wave: parseInt(row.wave),
-            enemyCount: parseInt(row.enemyCount),
-            spawnDelay: parseInt(row.spawnDelay),
-            wardenEveryN: parseInt(row.wardenEveryN)
-        }));
-    } catch (e) {
+        waveDefs = byTab.waves.map(row => {
+            const pulses = row.array.split("|").map(pulse =>
+                pulse.split(":").map(code => code.trim())
+            );
+            return {
+                wave:          parseInt(row.wave),
+                unitInterval:  parseInt(row.unitInterval),
+                pulseInterval: parseInt(row.pulseInterval),
+                pulses
+            };
+        });
+    } catch(e) {
         showLoadError("Error parsing waves tab: " + e.message);
         return false;
     }
@@ -164,6 +186,10 @@ const ctx = canvas.getContext("2d");
 
 canvas.width = 840;
 canvas.height = 540;
+const gameScreen = document.getElementById("gameScreen");
+const farmScreen = document.getElementById("farmScreen");
+const farmCanvas = document.getElementById("farmCanvas");
+const farmCtx = farmCanvas.getContext("2d");
 
 const HEX_SIZE = 20;
 const HEX_W = Math.sqrt(3) * HEX_SIZE;
@@ -192,6 +218,7 @@ const LUMBERJACK_ATTACK_INTERVAL = 2500;
 const WARDEN_ATTACK_INTERVAL = 3000;
 
 const restartBtn = { x: 0, y: 0, w: 160, h: 40 };
+const farmBtn = { x: 0, y: 0, w: 160, h: 40 };
 
 // ─── IMAGES ───────────────────────────────────────────────────────────────────
 const lumberjackImage = new Image();
@@ -230,16 +257,46 @@ const resourceIcons = {
     rope: ropeIcon
 };
 // Anchor offsets — raise sprite by this many px to compensate for transparent padding
-const LUMBERJACK_ANCHOR_OFFSET = 12;  
+const LUMBERJACK_ANCHOR_OFFSET = 8;  
 const CATAPULT_ANCHOR_OFFSET = 12;  
 const WARDEN_ANCHOR_OFFSET = 12; 
 const CROSSBOW_ANCHOR_OFFSET = 12; 
 const ELIAS_ANCHOR_OFFSET = 60;
 const FENCE_ANCHOR_OFFSET = -6;
 const SPORECAP_ANCHOR_OFFSET = 6;
+const ANCHOR_RANDOM_RANGE = 8;
 
-crossbowImage.onload = () => console.log("Crossbow image loaded!");
-crossbowImage.onerror = () => console.error("Crossbow image FAILED to load!");
+const lumberjackSheet = new Image();
+lumberjackSheet.src = "images/lumberjack_walk.png";
+
+const SPRITE_CONFIGS = {
+    lumberjack: {
+        sheet: null,        // will be set to lumberjackSheet once loaded
+        frameWidth: 134,     // ← set this to your frame width in pixels
+        frameHeight: 180,    // ← set this to your frame height in pixels
+        frameCount: 6,      // ← number of frames
+        fps: 8              // ← animation speed in frames per second
+    }
+};
+
+lumberjackSheet.onload = () => {
+    SPRITE_CONFIGS.lumberjack.sheet = lumberjackSheet;
+};
+
+//const wardenSheet = new Image();
+//wardenSheet.src = "images/warden_walk.png";
+
+//SPRITE_CONFIGS.warden = {
+//    sheet: null,
+//    frameWidth: 80,
+//    frameHeight: 110,
+//    frameCount: 6,
+//    fps: 6
+//};
+
+//wardenSheet.onload = () => {
+//    SPRITE_CONFIGS.warden.sheet = wardenSheet;
+//};
 
 // ─── UI ELEMENTS ──────────────────────────────────────────────────────────────
 const livesDisplay = document.getElementById("lives");
@@ -281,7 +338,16 @@ let resources = {
     rock: 0,
     steel: 0
 };
+let currentScreen = "farm"; // start on "farm" or "game" for TD map
+
 let wave = 1;
+let betweenWaves = true;
+let waveTimer = 180;
+let currentPulseIndex = 0;
+let currentUnitIndex = 0;
+let unitTimer = 0;
+let pulseTimer = 0;
+let waitingForPulse = false; // true = between pulses, false = spawning units
 let bullets = [];
 let activeMenu = null; // { col, row, mode } mode = "slot" or "tower"
 let mousePos = { x: 0, y: 0 };
@@ -291,12 +357,6 @@ let enemies = [];
 let towers = [];
 let projectiles = [];
 let splashes = [];
-let enemiesToSpawn = 0;
-let spawnTimer = 0;
-let spawnDelay = 60;
-let spawnCount = 0; // tracks total enemies spawned this wave
-let betweenWaves = true;
-let waveTimer = 180;
 
 let path = [];
 let towerSlots = [];
@@ -475,52 +535,89 @@ function drawElias() {
     ctx.drawImage(eliasImage, cx - ew / 2, cy - eh + ELIAS_ANCHOR_OFFSET, ew, eh);
 }
 // ─── WAVES ────────────────────────────────────────────────────────────────────
-function updateWaves(dt) {
-    if (gameOver) return;
+function updateWaves() {
+    if (gameOver || gameWon) return;
 
+    // Between waves
     if (betweenWaves) {
-        waveTimer -= dt;
-        if (waveTimer <= 0) startWave();
+        if (--waveTimer <= 0) startWave();
         return;
     }
-    if (enemiesToSpawn > 0) {
-        spawnTimer -= dt;
-        if (spawnTimer <= 0) {
-            spawnEnemy();
-            enemiesToSpawn--;
-            spawnTimer = spawnDelay;
+
+    const waveDef = waveDefs[wave - 1];
+    if (!waveDef) return;
+
+    const pulses = waveDef.pulses;
+
+    // All pulses done — check if wave is complete
+    if (currentPulseIndex >= pulses.length) {
+        if (enemies.length === 0) {
+            if (wave >= waveDefs.length) {
+                gameWon = true;
+                return;
+            }
+            betweenWaves = true;
+            wave++;
+            waveTimer = Math.round(waveDef.pulseInterval / (1000 / 60));
+            updateUI();
         }
+        return;
     }
-    if (enemiesToSpawn === 0 && enemies.length === 0) {
-        if (wave >= waveDefs.length) {
-            gameWon = true;
-            return;
+
+    // Waiting between pulses
+    if (waitingForPulse) {
+        if (--pulseTimer <= 0) {
+            waitingForPulse = false;
+            currentUnitIndex = 0;
         }
-        betweenWaves = true;
-        wave++;
-        waveTimer = 180;
-        updateUI();
+        return;
+    }
+
+    const currentPulse = pulses[currentPulseIndex];
+
+    // All units in this pulse spawned — move to next pulse
+    if (currentUnitIndex >= currentPulse.length) {
+        currentPulseIndex++;
+        if (currentPulseIndex < pulses.length) {
+            waitingForPulse = true;
+            pulseTimer = Math.round(waveDef.pulseInterval / (1000 / 60));
+        }
+        return;
+    }
+
+    // Spawn next unit
+    if (--unitTimer <= 0) {
+        const code = currentPulse[currentUnitIndex];
+        spawnEnemy(code);
+        currentUnitIndex++;
+        unitTimer = Math.round(waveDef.unitInterval / (1000 / 60));
     }
 }
 
 function startWave() {
     betweenWaves = false;
-    const def = waveDefs[Math.min(wave - 1, waveDefs.length - 1)];
-    enemiesToSpawn = def.enemyCount;
-    spawnDelay = def.spawnDelay;
-    spawnTimer = 0;
-    spawnCount = 0;
+    currentPulseIndex = 0;
+    currentUnitIndex = 0;
+    unitTimer = 0;
+    pulseTimer = 0;
+    waitingForPulse = false;
     updateUI();
 }
 
 
 // ─── ENEMIES ──────────────────────────────────────────────────────────────────
-function spawnEnemy() {
-    spawnCount++;
-    const currentWaveDef = waveDefs[Math.min(wave - 1, waveDefs.length - 1)];
-    const isWarden = spawnCount % currentWaveDef.wardenEveryN === 0;
-    const def = isWarden ? enemyDefs["warden"] : enemyDefs["lumberjack"];
+function spawnEnemy(code) {
+    const typeMap = {
+        "lu": "lumberjack",
+        "wa": "warden"
+    };
+    const type = typeMap[code];
+    if (!type || !enemyDefs[type]) return;
+
+    const def = enemyDefs[type];
     const start = hexToPixel(path[0].col, path[0].row);
+    const anchorOffset = (Math.random() * ANCHOR_RANDOM_RANGE * 2) - ANCHOR_RANDOM_RANGE;
+
     enemies.push({
         pathIndex: 0,
         x: start.x,
@@ -529,9 +626,12 @@ function spawnEnemy() {
         hp: def.hp,
         maxHp: def.hp,
         damage: def.damage,
-        type: isWarden ? "warden" : "lumberjack",
+        drops: def.drops,
+        type,
         dead: false,
-        dirX: 1
+        dying: false,
+        dirX: 1,
+        anchorOffset
     });
 }
 
@@ -637,7 +737,7 @@ function drawEnemies() {
         const isWarden = enemy.type === "warden";
         const sw = isWarden ? 52 : 40;
         const sh = isWarden ? 56 : 48;
-        const offset = isWarden ? WARDEN_ANCHOR_OFFSET : LUMBERJACK_ANCHOR_OFFSET;
+        const offset = (isWarden ? WARDEN_ANCHOR_OFFSET : LUMBERJACK_ANCHOR_OFFSET) + (enemy.anchorOffset || 0);
         const sprite = isWarden ? wardenImage : lumberjackImage;
 
         const drawX = enemy.x - sw / 2;
@@ -719,11 +819,24 @@ function drawEnemies() {
             continue;
         }
 
-        if (enemy.dirX < 0) {
-            ctx.scale(-1, 1);
-            ctx.drawImage(sprite, -drawX - sw, drawY, sw, sh);
+        const frameData = getSpriteFrame(enemy);
+
+        if (frameData && !isWarden) {
+            const { config, frameIndex } = frameData;
+            const sx = frameIndex * config.frameWidth;
+            if (enemy.dirX < 0) {
+                ctx.scale(-1, 1);
+                ctx.drawImage(config.sheet, sx, 0, config.frameWidth, config.frameHeight, -drawX - sw, drawY, sw, sh);
+            } else {
+                ctx.drawImage(config.sheet, sx, 0, config.frameWidth, config.frameHeight, drawX, drawY, sw, sh);
+            }
         } else {
-            ctx.drawImage(sprite, drawX, drawY, sw, sh);
+            if (enemy.dirX < 0) {
+                ctx.scale(-1, 1);
+                ctx.drawImage(sprite, -drawX - sw, drawY, sw, sh);
+            } else {
+                ctx.drawImage(sprite, drawX, drawY, sw, sh);
+            }
         }
         ctx.restore();
 
@@ -733,6 +846,13 @@ function drawEnemies() {
         ctx.fillStyle = isWarden ? "orange" : "lime";
         ctx.fillRect(drawX, drawY - 6, sw * (enemy.hp / enemy.maxHp), 4);
     }
+}
+function getSpriteFrame(enemy) {
+    const config = SPRITE_CONFIGS[enemy.type];
+    if (!config || !config.sheet) return null;
+    const now = performance.now();
+    const frameIndex = Math.floor((now / (1000 / config.fps))) % config.frameCount;
+    return { config, frameIndex };
 }
 function parseDrops(dropsStr) {
     if (!dropsStr) return [];
@@ -901,11 +1021,13 @@ canvas.addEventListener("click", (event) => {
         projectiles = [];
         resources = { gold: 200, rope: 0, wood: 0, rock: 0, steel: 0 };
         wave = 1;
-        enemiesToSpawn = 0;
-        spawnTimer = 0;
-        spawnCount = 0;
         betweenWaves = true;
         waveTimer = 180;
+        currentPulseIndex = 0;
+        currentUnitIndex = 0;
+        unitTimer = 0;
+        pulseTimer = 0;
+        waitingForPulse = false;
         activeMenu = null;
         activeSkills = {
             molotov: { cooldownStart: performance.now(), ready: false },
@@ -919,6 +1041,12 @@ canvas.addEventListener("click", (event) => {
         requestAnimationFrame(gameLoop);
         return;
     }
+    if ((gameOver || gameWon) &&
+    px >= farmBtn.x && px <= farmBtn.x + farmBtn.w &&
+    py >= farmBtn.y && py <= farmBtn.y + farmBtn.h) {
+    showFarm();
+    return;
+    }   
     // If a menu is open, check if click is inside it
     if (activeMenu) {
         const { x: cx, y: cy } = hexToPixel(activeMenu.col, activeMenu.row);
@@ -1042,6 +1170,51 @@ window.addEventListener("keydown", (e) => {
         } else {
             skillMessage.innerText = "Acid is on cooldown!";
         }
+    }
+});
+farmCanvas.addEventListener("click", (event) => {
+    const rect = farmCanvas.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+
+    // "Defend West Field" button
+    const btnW = 200;
+    const btnH = 44;
+    const btnX = farmCanvas.width / 2 - btnW / 2;
+    const btnY = farmCanvas.height / 2 - btnH / 2;
+
+    if (px >= btnX && px <= btnX + btnW && py >= btnY && py <= btnY + btnH) {
+        showGame();
+        // Reset and start game
+        cancelAnimationFrame(animationFrameId);
+        fence = { hp: MAX_FENCE_HP, maxHp: MAX_FENCE_HP, attackers: [] };
+        gameOver = false;
+        gameWon = false;
+        enemies = [];
+        towers = [];
+        bullets = [];
+        splashes = [];
+        projectiles = [];
+        sporeClouds = [];
+        dropAnimations = [];
+        floatingDmgNumbers = [];
+        wave = 1;
+        betweenWaves = true;
+        waveTimer = 180;
+        currentPulseIndex = 0;
+        currentUnitIndex = 0;
+        unitTimer = 0;
+        pulseTimer = 0;
+        waitingForPulse = false;
+        activeMenu = null;
+        activeSkills = {
+            molotov: { cooldownStart: performance.now(), ready: false },
+            acid: { cooldownStart: performance.now(), ready: false }
+        };
+        pendingSkill = null;
+        lastFrameTime = null;
+        updateUI();
+        requestAnimationFrame(gameLoop);
     }
 });
 function updateProjectiles() {
@@ -1740,6 +1913,38 @@ function updateTowers(dt) {
             ctx.textAlign = "center";
             ctx.fillText("↺ Restart", cx, restartBtn.y + 26);
         }
+        function drawHomeButton() {
+            const cx = canvas.width / 2;
+            restartBtn.x = cx - restartBtn.w / 2 - 90;
+            restartBtn.y = canvas.height / 2 + 60;
+
+            // Restart button
+            farmBtn.x = cx + 10;
+            farmBtn.y = canvas.height / 2 + 60;
+
+            ctx.fillStyle = "#2d3f2d";
+            ctx.strokeStyle = "#8b6f47";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.roundRect(restartBtn.x, restartBtn.y, restartBtn.w, restartBtn.h, 6);
+            ctx.fill();
+            ctx.stroke();
+            ctx.fillStyle = "#f0f0d8";
+            ctx.font = "bold 14px Arial";
+            ctx.textAlign = "center";
+            ctx.fillText("↺ Restart", restartBtn.x + restartBtn.w / 2, restartBtn.y + 26);
+
+            // Home button
+            ctx.fillStyle = "#2d3f2d";
+            ctx.strokeStyle = "#8b6f47";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.roundRect(farmBtn.x, farmBtn.y, farmBtn.w, farmBtn.h, 6);
+            ctx.fill();
+            ctx.stroke();
+            ctx.fillStyle = "#f0f0d8";
+            ctx.fillText("🏡 Home", farmBtn.x + farmBtn.w / 2, farmBtn.y + 26);
+        }
         function drawGameOver() {
             ctx.fillStyle = "rgba(0,0,0,0.7)";
             ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -1750,7 +1955,7 @@ function updateTowers(dt) {
             ctx.fillStyle = "#f0f0d8";
             ctx.font = "16px Arial";
             ctx.fillText("The fence was destroyed!", canvas.width / 2, canvas.height / 2 + 20);
-            drawRestartButton();
+            drawHomeButton();
         }
         function drawGameWon() {
             ctx.fillStyle = "rgba(0,0,0,0.7)";
@@ -1762,7 +1967,7 @@ function updateTowers(dt) {
             ctx.fillStyle = "#f0f0d8";
             ctx.font = "16px Arial";
             ctx.fillText("All waves defeated!", canvas.width / 2, canvas.height / 2 + 20);
-            drawRestartButton();
+            drawHomeButton();
         }
         // ─── GRID ─────────────────────────────────────────────────────────────────────
         function drawGrid() {
@@ -1840,6 +2045,70 @@ function updateTowers(dt) {
 
             }
         }
+        function drawFarmScreen() {
+            farmCtx.clearRect(0, 0, farmCanvas.width, farmCanvas.height);
+
+            // Background
+            farmCtx.fillStyle = "#355e3b";
+            farmCtx.fillRect(0, 0, farmCanvas.width, farmCanvas.height);
+
+            // Decorative hex grid
+            farmCtx.strokeStyle = "rgba(255,255,255,0.05)";
+            farmCtx.lineWidth = 1;
+            for (let row = 0; row < 13; row++) {
+                for (let col = 0; col < 19; col++) {
+                    const x = HEX_W / 2 + col * COL_STEP + (row % 2 === 1 ? HEX_W / 2 : 0);
+                    const y = HEX_SIZE + row * ROW_STEP;
+                    farmCtx.beginPath();
+                    for (let i = 0; i < 6; i++) {
+                        const angle = (Math.PI / 180) * (60 * i - 30);
+                        const px = x + HEX_SIZE * Math.cos(angle);
+                        const py = y + HEX_SIZE * Math.sin(angle);
+                        i === 0 ? farmCtx.moveTo(px, py) : farmCtx.lineTo(px, py);
+                    }
+                    farmCtx.closePath();
+                    farmCtx.stroke();
+                }
+            }
+
+            // Fence icon on west edge
+            const fenceX = 60;
+            const fenceY = farmCanvas.height / 2;
+            const fw = 60;
+            const fh = 60;
+            farmCtx.drawImage(fenceImage, fenceX - fw / 2, fenceY - fh, fw, fh);
+            farmCtx.fillStyle = "#f0f0d8";
+            farmCtx.font = "bold 13px Arial";
+            farmCtx.textAlign = "center";
+            farmCtx.fillText("West Field", fenceX, fenceY + 14);
+
+            // Defend button
+            const btnW = 220;
+            const btnH = 44;
+            const btnX = farmCanvas.width / 2 - btnW / 2;
+            const btnY = farmCanvas.height / 2 - btnH / 2;
+
+            farmCtx.fillStyle = "#2d3f2d";
+            farmCtx.strokeStyle = "#4a8f4a";
+            farmCtx.lineWidth = 2;
+            farmCtx.beginPath();
+            farmCtx.roundRect(btnX, btnY, btnW, btnH, 6);
+            farmCtx.fill();
+            farmCtx.stroke();
+            farmCtx.fillStyle = "#f0f0d8";
+            farmCtx.font = "bold 16px Arial";
+            farmCtx.textAlign = "center";
+            farmCtx.fillText("⚔ Defend West Field", farmCanvas.width / 2, btnY + 28);
+
+            updateFarmUI();
+        }
+        function updateFarmUI() {
+            document.getElementById("farm-gold").innerText  = resources.gold;
+            document.getElementById("farm-rock").innerText  = resources.rock;
+            document.getElementById("farm-wood").innerText  = resources.wood;
+            document.getElementById("farm-rope").innerText  = resources.rope;
+            document.getElementById("farm-steel").innerText = resources.steel;
+        }
         // ─── GAME LOOP ────────────────────────────────────────────────────────────────
         function gameLoop(timestamp) {
             const dt = lastFrameTime === null ? 1 : Math.min((timestamp - lastFrameTime) / (1000 / 60), 3);
@@ -1863,8 +2132,8 @@ function updateTowers(dt) {
             updateTowers(dt);
             updateBullets(dt);
             updateSplashes();
-            updateSporeClouds(); 
-            updateProjectiles(); 
+            updateSporeClouds();
+            updateProjectiles();
             updateFloatingNumbers();
             updateDropAnimations();
 
@@ -1872,16 +2141,15 @@ function updateTowers(dt) {
             drawTileIDs();
             drawElias();
             drawFence();
-            drawSporeClouds(); 
+            drawSporeClouds();
             drawTowers();
-            drawUpgradeIndicators(); 
+            drawUpgradeIndicators();
             drawSplashes();
             drawBullets();
-            drawProjectiles();  
+            drawProjectiles();
             drawEnemies();
             drawMenu();
             drawFloatingNumbers();
-            
 
             ctx.restore();
             updateUI();
@@ -1891,6 +2159,7 @@ function updateTowers(dt) {
             }
             animationFrameId = requestAnimationFrame(gameLoop);
         }
+
         // Show loading screen then start
         const loadingCtx = canvas.getContext("2d");
         loadingCtx.fillStyle = "#1a2a1a";
@@ -1900,9 +2169,56 @@ function updateTowers(dt) {
         loadingCtx.textAlign = "center";
         loadingCtx.fillText("Loading level data...", canvas.width / 2, canvas.height / 2);
 
-        loadLevelData().then(success => {
+       loadLevelData().then(success => {
             if (success) {
                 updateUI();
-                requestAnimationFrame(gameLoop);
+                showFarm(); // ← start on farm instead of gameLoop()
             }
         });
+
+
+        function fadeTransition(callback) {
+            const overlay = document.createElement("div");
+            overlay.style.cssText = `
+                position: fixed;
+                top: 0; left: 0;
+                width: 100%; height: 100%;
+                background: #000;
+                opacity: 0;
+                transition: opacity 0.4s;
+                z-index: 9999;
+                pointer-events: none;
+            `;
+            document.body.appendChild(overlay);
+            
+            // Fade in
+            requestAnimationFrame(() => {
+                overlay.style.opacity = "1";
+                setTimeout(() => {
+                    callback();
+                    // Fade out
+                    overlay.style.opacity = "0";
+                    setTimeout(() => {
+                        document.body.removeChild(overlay);
+                    }, 400);
+                }, 400);
+            });
+        }
+
+       function showFarm() {
+            fadeTransition(() => {
+                currentScreen = "farm";
+                gameScreen.style.display = "none";
+                farmScreen.style.display = "block";
+                drawFarmScreen();
+                updateFarmUI();
+            });
+        }
+
+        function showGame() {
+            fadeTransition(() => {
+                currentScreen = "game";
+                farmScreen.style.display = "none";
+                gameScreen.style.display = "block";
+            });
+        }
