@@ -8,6 +8,7 @@ const SHEET_TABS = {
     towers: "https://docs.google.com/spreadsheets/d/e/2PACX-1vRLux8wUWBie8iABrxq8JzZnOE3UqbfIjr2VnpzR0g-QDhGd2hBoF1rLKwsZY9bSU-cv8Piycw2v_i1/pub?gid=1295348356&single=true&output=csv",
     waves: "https://docs.google.com/spreadsheets/d/e/2PACX-1vRLux8wUWBie8iABrxq8JzZnOE3UqbfIjr2VnpzR0g-QDhGd2hBoF1rLKwsZY9bSU-cv8Piycw2v_i1/pub?gid=767042368&single=true&output=csv",
     activeSkills: "https://docs.google.com/spreadsheets/d/e/2PACX-1vRLux8wUWBie8iABrxq8JzZnOE3UqbfIjr2VnpzR0g-QDhGd2hBoF1rLKwsZY9bSU-cv8Piycw2v_i1/pub?gid=725712595&single=true&output=csv",
+    workshops: "https://docs.google.com/spreadsheets/d/e/2PACX-1vRLux8wUWBie8iABrxq8JzZnOE3UqbfIjr2VnpzR0g-QDhGd2hBoF1rLKwsZY9bSU-cv8Piycw2v_i1/pub?gid=1398188100&single=true&output=csv",
 };
 function sheetURL(tab) {
     return SHEET_TABS[tab];
@@ -38,11 +39,11 @@ function showLoadError(message) {
     ctx.fillText("Check your Google Sheet is published and tab names are correct.", canvas.width / 2, canvas.height / 2 + 35);
 }
 
-const CACHE_KEY = "fpd_levelData";
+const CACHE_KEY = "fpd_levelData_v3";
 const CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
 async function loadLevelData() {
-    const tabs = ["path", "slots", "enemies", "towers", "waves", "activeSkills"];
+    const tabs = ["path", "slots", "enemies", "towers", "waves", "activeSkills", "workshops"];
 
     // Try cache first
     try {
@@ -178,6 +179,27 @@ function applyLevelData(byTab) {
         showLoadError("Error parsing activeSkills tab: " + e.message);
         return false;
     }
+
+    // ── Workshops ──
+    try {
+        workshopDefs = {};
+        for (const row of byTab.workshops) {
+            const type = row.type;
+            const tier = parseInt(row.tier);
+            if (!workshopDefs[type]) workshopDefs[type] = { maxTier: 0 };
+            workshopDefs[type][tier] = {
+                cost:           parseCosts(row.cost),
+                product:        row.product.trim(),
+                productAmount:  parseInt(row.productAmount),
+                productionTime: parseInt(row.productionTime)
+            };
+            if (tier > workshopDefs[type].maxTier) workshopDefs[type].maxTier = tier;
+        }
+    } catch(e) {
+        showLoadError("Error parsing workshops tab: " + e.message);
+        return false;
+    }
+
     return true;
 }
 // ─── HEX GRID SETUP ───────────────────────────────────────────────────────────
@@ -251,13 +273,22 @@ const metalIcon = new Image();
 metalIcon.src = "images/metalIcon.png";
 const ropeIcon = new Image();
 ropeIcon.src = "images/ropeIcon.png";
+const milkIcon = new Image();
+milkIcon.src = "images/milk.png";
 const resourceIcons = {
     gold: goldIcon,
     rock: rocksIcon,
     wood: woodIcon,
     steel: metalIcon,
-    rope: ropeIcon
+    rope: ropeIcon,
+    milk: milkIcon
 };
+const roperyImage = new Image();
+roperyImage.src = "images/ropery.png";
+const goatImage = new Image();
+goatImage.src = "images/goat.png";
+const farmhouseImage = new Image();
+farmhouseImage.src = "images/farmhouse.png";
 // Anchor offsets — raise sprite by this many px to compensate for transparent padding
 const LUMBERJACK_ANCHOR_OFFSET = 8;
 const CARRIAGE_ANCHOR_OFFSET = 10;
@@ -324,6 +355,24 @@ function getSidebarMidY() {
     return (rect.top + rect.height / 2) - canvasRect.top;
 }
 const DROP_ANIM_TARGET_Y_OFFSET = -100;
+// Farm building positions — computed from tile IDs after hexToPixel is available
+let ROPERY_X, ROPERY_Y;
+const ROPERY_W = 70;
+const ROPERY_H = 70;
+
+let GOAT_X, GOAT_Y;
+const GOAT_W = 70;
+const GOAT_H = 70;
+
+let FARM_FENCE_X, FARM_FENCE_Y;
+let DEFEND_BTN_X, DEFEND_BTN_Y;
+const DEFEND_BTN_W = 180;
+const DEFEND_BTN_H = 44;
+
+const FARMHOUSE_X = 400;
+const FARMHOUSE_Y = 200;
+const FARMHOUSE_W = 100;
+const FARMHOUSE_H = 100;
 
 // ─── GAME STATE ───────────────────────────────────────────────────────────────
 let fence = {
@@ -335,11 +384,12 @@ let fenceFlicker = { active: false, start: 0 };
 let gameOver = false;
 let gameWon = false;
 let resources = {
-    gold: 100, 
+    gold: 100,
     rope: 0,
     wood: 0,
     rock: 0,
-    steel: 0
+    steel: 0,
+    milk: 0
 };
 let currentScreen = "farm"; // start on "farm" or "game" for TD map
 
@@ -377,11 +427,55 @@ let activeSkills = {
 };
 let pendingSkill = null; // "molotov" or "acid" — waiting for click on canvas
 
+let workshopDefs = {};
+
+// Workshop instances on the farm
+let workshops = {
+    ropery: {
+        type: "ropery",
+        tier: 2,
+        productionStart: null,
+        stored: 0
+    },
+    goat: {
+        type: "goat",
+        tier: 1,
+        productionStart: null,
+        stored: 0
+    }
+};
+let farmAnimationId = null;
+let farmActiveMenu = null; // { type: "ropery" }
+
+function farmLoop() {
+    if (currentScreen !== "farm") return;
+    updateFarm();
+    drawFarmScreen();
+    farmAnimationId = requestAnimationFrame(farmLoop);
+}
+
 // ─── HEX MATH ─────────────────────────────────────────────────────────────────
 function hexToPixel(col, row) {
     const x = ORIGIN_X + col * COL_STEP + (row % 2 === 1 ? HEX_W / 2 : 0);
     const y = ORIGIN_Y + row * ROW_STEP;
     return { x, y };
+}
+
+// Farm tile positions (tile ID → col/row via GRID_COLS)
+{
+    const _fenceTile  = hexToPixel(130 % GRID_COLS, Math.floor(130 / GRID_COLS));
+    FARM_FENCE_X  = _fenceTile.x;
+    FARM_FENCE_Y  = _fenceTile.y;
+    DEFEND_BTN_X  = _fenceTile.x;
+    DEFEND_BTN_Y  = _fenceTile.y + HEX_SIZE + 6;
+
+    const _roperyTile = hexToPixel(280 % GRID_COLS, Math.floor(280 / GRID_COLS));
+    ROPERY_X = _roperyTile.x;
+    ROPERY_Y = _roperyTile.y + ROPERY_H / 2;
+
+    const _goatTile = hexToPixel(265 % GRID_COLS, Math.floor(265 / GRID_COLS));
+    GOAT_X = _goatTile.x;
+    GOAT_Y = _goatTile.y + GOAT_H / 2;
 }
 // Returns the 6 valid neighbours of a hex in offset coordinates
 function hexNeighbours(col, row) {
@@ -1024,7 +1118,7 @@ canvas.addEventListener("click", (event) => {
         bullets = [];
         splashes = [];
         projectiles = [];
-        resources = { gold: 200, rope: 0, wood: 0, rock: 0, steel: 0 };
+        resources = { gold: 200, rope: 0, wood: 0, rock: 0, steel: 0, milk: 0 };
         wave = 1;
         betweenWaves = true;
         waveTimer = 180;
@@ -1042,6 +1136,7 @@ canvas.addEventListener("click", (event) => {
         floatingNumbers = [];
         fenceFlicker = { active: false, start: 0 };
         lastFrameTime = null;
+        farmActiveMenu = null;
         updateUI();
         requestAnimationFrame(gameLoop);
         return;
@@ -1179,19 +1274,128 @@ window.addEventListener("keydown", (e) => {
 });
 farmCanvas.addEventListener("click", (event) => {
     const rect = farmCanvas.getBoundingClientRect();
-    const px = event.clientX - rect.left;
-    const py = event.clientY - rect.top;
+    const scaleX = farmCanvas.width / rect.width;
+    const scaleY = farmCanvas.height / rect.height;
+    const px = (event.clientX - rect.left) * scaleX;
+    const py = (event.clientY - rect.top) * scaleY;
 
-    // "Defend West Field" button
-    const btnW = 200;
-    const btnH = 44;
-    const btnX = farmCanvas.width / 2 - btnW / 2;
-    const btnY = farmCanvas.height / 2 - btnH / 2;
+    // Ropery — check open menu first (it floats above the building)
+    if (farmActiveMenu && farmActiveMenu.type === "ropery") {
+        const ropery = workshops.ropery;
+        if (!workshopDefs["ropery"]) { farmActiveMenu = null; return; }
+        const maxTier = workshopDefs["ropery"].maxTier;
+        const isMaxTier = ropery.tier >= maxTier;
+        const menuW = 160;
+        const menuH = isMaxTier ? 80 : 120;
+        const menuX = ROPERY_X - menuW / 2;
+        const menuY = ROPERY_Y - ROPERY_H - menuH - 10;
 
-    if (px >= btnX && px <= btnX + btnW && py >= btnY && py <= btnY + btnH) {
+        if (px >= menuX && px <= menuX + menuW &&
+            py >= menuY && py <= menuY + menuH) {
+            const relY = py - menuY;
+            if (!isMaxTier && relY > 30 && relY < 95) {
+                const nextDef = workshopDefs["ropery"][ropery.tier + 1];
+                if (canAfford(nextDef.cost)) {
+                    spendResources(nextDef.cost);
+                    ropery.tier++;
+                    ropery.productionStart = performance.now();
+                    updateFarmUI();
+                    updateUI();
+                }
+            }
+            farmActiveMenu = null;
+            return;
+        }
+    }
+
+    // Ropery building / hex ring click
+    const _roperyCx = ROPERY_X;
+    const _roperyCy = ROPERY_Y - ROPERY_H / 2;
+    const _inRoperyBuilding = px >= ROPERY_X - ROPERY_W / 2 && px <= ROPERY_X + ROPERY_W / 2 &&
+                              py >= ROPERY_Y - ROPERY_H && py <= ROPERY_Y + 30;
+    const _inRoperyHex = workshops.ropery.tier >= 2 &&
+                         Math.hypot(px - _roperyCx, py - _roperyCy) <= 46;
+    if (_inRoperyBuilding || _inRoperyHex) {
+        // Collect stored ropes if any
+        const ropery = workshops.ropery;
+        if (ropery.stored > 0) {
+            resources.rope += ropery.stored;
+            ropery.stored = 0;
+            updateFarmUI();
+            updateUI();
+            farmActiveMenu = null;
+            return;
+        }
+
+        // Open menu
+        farmActiveMenu = { type: "ropery" };
+        return;
+    }
+
+    // Goat — check open menu first
+    if (farmActiveMenu && farmActiveMenu.type === "goat") {
+        const goat = workshops.goat;
+        if (!workshopDefs["goat"]) { farmActiveMenu = null; return; }
+        const maxTier = workshopDefs["goat"].maxTier;
+        const isMaxTier = goat.tier >= maxTier;
+        const menuW = 160;
+        const menuH = isMaxTier ? 80 : 120;
+        const menuX = GOAT_X - menuW / 2;
+        const menuY = GOAT_Y - GOAT_H - menuH - 10;
+
+        if (px >= menuX && px <= menuX + menuW &&
+            py >= menuY && py <= menuY + menuH) {
+            const relY = py - menuY;
+            if (!isMaxTier && relY > 30 && relY < 95) {
+                const nextDef = workshopDefs["goat"][goat.tier + 1];
+                if (canAfford(nextDef.cost)) {
+                    spendResources(nextDef.cost);
+                    goat.tier++;
+                    goat.productionStart = performance.now();
+                    updateFarmUI();
+                    updateUI();
+                }
+            }
+            farmActiveMenu = null;
+            return;
+        }
+    }
+
+    // Goat building click
+    const _goatCx = GOAT_X;
+    const _goatCy = GOAT_Y - GOAT_H / 2;
+    const _inGoatBuilding = px >= GOAT_X - GOAT_W / 2 && px <= GOAT_X + GOAT_W / 2 &&
+                            py >= GOAT_Y - GOAT_H && py <= GOAT_Y + 30;
+    const _inGoatHex = workshops.goat.tier >= 2 &&
+                       Math.hypot(px - _goatCx, py - _goatCy) <= 46;
+    if (_inGoatBuilding || _inGoatHex) {
+        const goat = workshops.goat;
+        if (goat.stored > 0) {
+            resources.milk += goat.stored;
+            goat.stored = 0;
+            updateFarmUI();
+            updateUI();
+            farmActiveMenu = null;
+            return;
+        }
+        farmActiveMenu = { type: "goat" };
+        return;
+    }
+
+    // Click outside menu — close it
+    if (farmActiveMenu) {
+        farmActiveMenu = null;
+        return;
+    }
+
+    // Defend button click
+    if (px >= DEFEND_BTN_X - DEFEND_BTN_W / 2 &&
+        px <= DEFEND_BTN_X + DEFEND_BTN_W / 2 &&
+        py >= DEFEND_BTN_Y &&
+        py <= DEFEND_BTN_Y + DEFEND_BTN_H) {
         showGame();
-        // Reset and start game
         cancelAnimationFrame(animationFrameId);
+        // reset game state
         fence = { hp: MAX_FENCE_HP, maxHp: MAX_FENCE_HP, attackers: [] };
         gameOver = false;
         gameWon = false;
@@ -1217,9 +1421,9 @@ farmCanvas.addEventListener("click", (event) => {
             acid: { cooldownStart: performance.now(), ready: false }
         };
         pendingSkill = null;
-        lastFrameTime = null;
         updateUI();
-        requestAnimationFrame(gameLoop);
+        gameLoop();
+        return;
     }
 });
 function updateProjectiles() {
@@ -1998,6 +2202,7 @@ function updateTowers(dt) {
             document.getElementById("res-wood").innerText  = resources.wood;
             document.getElementById("res-rope").innerText  = resources.rope;
             document.getElementById("res-steel").innerText = resources.steel;
+            document.getElementById("res-milk").innerText  = resources.milk;
         }
         const molotovCanvas = document.getElementById("molotovTimer");
         const acidCanvas = document.getElementById("acidTimer");
@@ -2053,57 +2258,60 @@ function updateTowers(dt) {
         function drawFarmScreen() {
             farmCtx.clearRect(0, 0, farmCanvas.width, farmCanvas.height);
 
-            // Background
-            farmCtx.fillStyle = "#355e3b";
+            // Background (outside the hex grid)
+            farmCtx.fillStyle = "#1f2f1f";
             farmCtx.fillRect(0, 0, farmCanvas.width, farmCanvas.height);
 
-            // Decorative hex grid
-            farmCtx.strokeStyle = "rgba(255,255,255,0.05)";
-            farmCtx.lineWidth = 1;
-            for (let row = 0; row < 13; row++) {
-                for (let col = 0; col < 19; col++) {
-                    const x = HEX_W / 2 + col * COL_STEP + (row % 2 === 1 ? HEX_W / 2 : 0);
-                    const y = HEX_SIZE + row * ROW_STEP;
+            // Hex grid — same shape and size as the game grid
+            for (let row = 0; row < GRID_ROWS; row++) {
+                for (let col = 0; col < GRID_COLS; col++) {
+                    if (!isInHexGrid(col, row)) continue;
+                    const { x, y } = hexToPixel(col, row);
+                    const corners = hexCorners(x, y);
                     farmCtx.beginPath();
-                    for (let i = 0; i < 6; i++) {
-                        const angle = (Math.PI / 180) * (60 * i - 30);
-                        const px = x + HEX_SIZE * Math.cos(angle);
-                        const py = y + HEX_SIZE * Math.sin(angle);
-                        i === 0 ? farmCtx.moveTo(px, py) : farmCtx.lineTo(px, py);
-                    }
+                    farmCtx.moveTo(corners[0].x, corners[0].y);
+                    for (let i = 1; i < 6; i++) farmCtx.lineTo(corners[i].x, corners[i].y);
                     farmCtx.closePath();
+                    farmCtx.fillStyle = "#355e3b";
+                    farmCtx.fill();
+                    farmCtx.strokeStyle = "#ffffff11";
+                    farmCtx.lineWidth = 1;
                     farmCtx.stroke();
                 }
             }
 
-            // Fence icon on west edge
-            const fenceX = 60;
-            const fenceY = farmCanvas.height / 2;
-            const fw = 60;
-            const fh = 60;
-            farmCtx.drawImage(fenceImage, fenceX - fw / 2, fenceY - fh, fw, fh);
+            // Farmhouse
+            farmCtx.drawImage(farmhouseImage,
+                FARMHOUSE_X - FARMHOUSE_W / 2,
+                FARMHOUSE_Y - FARMHOUSE_H,
+                FARMHOUSE_W, FARMHOUSE_H);
+
+            // Fence icon on tile 130
+            farmCtx.drawImage(fenceImage, FARM_FENCE_X - 30, FARM_FENCE_Y - 60, 60, 60);
             farmCtx.fillStyle = "#f0f0d8";
             farmCtx.font = "bold 13px Arial";
             farmCtx.textAlign = "center";
-            farmCtx.fillText("West Field", fenceX, fenceY + 14);
+            farmCtx.fillText("West Field", FARM_FENCE_X, FARM_FENCE_Y + 14);
 
-            // Defend button
-            const btnW = 220;
-            const btnH = 44;
-            const btnX = farmCanvas.width / 2 - btnW / 2;
-            const btnY = farmCanvas.height / 2 - btnH / 2;
-
+            // Defend button — near west fence
             farmCtx.fillStyle = "#2d3f2d";
             farmCtx.strokeStyle = "#4a8f4a";
             farmCtx.lineWidth = 2;
             farmCtx.beginPath();
-            farmCtx.roundRect(btnX, btnY, btnW, btnH, 6);
+            farmCtx.roundRect(DEFEND_BTN_X - DEFEND_BTN_W / 2, DEFEND_BTN_Y,
+                DEFEND_BTN_W, DEFEND_BTN_H, 6);
             farmCtx.fill();
             farmCtx.stroke();
             farmCtx.fillStyle = "#f0f0d8";
-            farmCtx.font = "bold 16px Arial";
+            farmCtx.font = "bold 14px Arial";
             farmCtx.textAlign = "center";
-            farmCtx.fillText("⚔ Defend West Field", farmCanvas.width / 2, btnY + 28);
+            farmCtx.fillText("⚔ Defend West Field",
+                DEFEND_BTN_X, DEFEND_BTN_Y + 28);
+
+            // Workshops
+            drawRopery();
+            drawGoat();
+            drawFarmMenu();
 
             updateFarmUI();
         }
@@ -2113,7 +2321,322 @@ function updateTowers(dt) {
             document.getElementById("farm-wood").innerText  = resources.wood;
             document.getElementById("farm-rope").innerText  = resources.rope;
             document.getElementById("farm-steel").innerText = resources.steel;
+            document.getElementById("farm-milk").innerText  = resources.milk;
         }
+        function updateWorkshop(key) {
+            const now = performance.now();
+            const w = workshops[key];
+            const def = workshopDefs[key] ? workshopDefs[key][w.tier] : null;
+            if (!def) return;
+            if (w.productionStart === null) {
+                w.productionStart = now;
+            } else {
+                const elapsed = now - w.productionStart;
+                if (elapsed >= def.productionTime * 1000) {
+                    w.stored += def.productAmount;
+                    w.productionStart = now;
+                }
+            }
+        }
+        function updateFarm() {
+            updateWorkshop("ropery");
+            updateWorkshop("goat");
+        }
+        function drawFarmMenu() {
+            if (!farmActiveMenu) return;
+
+            if (farmActiveMenu.type === "ropery") {
+                const ropery = workshops.ropery;
+                if (!workshopDefs["ropery"]) return;
+                const maxTier = workshopDefs["ropery"].maxTier;
+                const isMaxTier = ropery.tier >= maxTier;
+                const nextDef = !isMaxTier ? workshopDefs["ropery"][ropery.tier + 1] : null;
+                const canUpgrade = !isMaxTier && canAfford(nextDef.cost);
+
+                const menuW = 160;
+                const menuH = isMaxTier ? 80 : 120;
+                const menuX = ROPERY_X - menuW / 2;
+                const menuY = ROPERY_Y - ROPERY_H - menuH - 10;
+
+                // Background
+                farmCtx.fillStyle = "#1a2a1a";
+                farmCtx.strokeStyle = "#8b6f47";
+                farmCtx.lineWidth = 2;
+                farmCtx.beginPath();
+                farmCtx.roundRect(menuX, menuY, menuW, menuH, 6);
+                farmCtx.fill();
+                farmCtx.stroke();
+
+                farmCtx.font = "bold 11px Arial";
+                farmCtx.textAlign = "left";
+
+                // Row 1: info
+                farmCtx.fillStyle = "#aaa";
+                const def = workshopDefs["ropery"][ropery.tier];
+                farmCtx.fillText(`Ropery T${ropery.tier}  +${def.productAmount} rope/${def.productionTime}s`,
+                    menuX + 10, menuY + 20);
+
+                // Divider
+                farmCtx.strokeStyle = "#444";
+                farmCtx.lineWidth = 1;
+                farmCtx.beginPath();
+                farmCtx.moveTo(menuX + 8, menuY + 28);
+                farmCtx.lineTo(menuX + menuW - 8, menuY + 28);
+                farmCtx.stroke();
+
+                if (isMaxTier) {
+                    farmCtx.fillStyle = "#555";
+                    farmCtx.fillText("⬆ Max tier", menuX + 10, menuY + 50);
+                } else {
+                    // Upgrade option
+                    farmCtx.fillStyle = canUpgrade ? "#f0f0d8" : "#888";
+                    farmCtx.fillText(`⬆ T${ropery.tier + 1}`, menuX + 10, menuY + 50);
+                    // Cost indicators
+                    drawFarmCostList(nextDef.cost, menuX + 10, menuY + 65);
+                    // Stat preview
+                    farmCtx.font = "10px Arial";
+                    farmCtx.fillStyle = "#80ff40";
+                    farmCtx.fillText(`+${nextDef.productAmount} rope/${nextDef.productionTime}s`,
+                        menuX + 10, menuY + 85);
+                    farmCtx.font = "bold 11px Arial";
+
+                    // Divider
+                    farmCtx.strokeStyle = "#444";
+                    farmCtx.lineWidth = 1;
+                    farmCtx.beginPath();
+                    farmCtx.moveTo(menuX + 8, menuY + 93);
+                    farmCtx.lineTo(menuX + menuW - 8, menuY + 93);
+                    farmCtx.stroke();
+
+                    farmCtx.fillStyle = "#aaa";
+                    farmCtx.fillText("Click building to collect", menuX + 10, menuY + 110);
+                }
+            }
+
+            if (farmActiveMenu.type === "goat") {
+                const goat = workshops.goat;
+                if (!workshopDefs["goat"]) return;
+                const maxTier = workshopDefs["goat"].maxTier;
+                const isMaxTier = goat.tier >= maxTier;
+                const nextDef = !isMaxTier ? workshopDefs["goat"][goat.tier + 1] : null;
+                const canUpgrade = !isMaxTier && canAfford(nextDef.cost);
+                const def = workshopDefs["goat"][goat.tier];
+
+                const menuW = 160;
+                const menuH = isMaxTier ? 80 : 120;
+                const menuX = GOAT_X - menuW / 2;
+                const menuY = GOAT_Y - GOAT_H - menuH - 10;
+
+                farmCtx.fillStyle = "#1a2a1a";
+                farmCtx.strokeStyle = "#8b6f47";
+                farmCtx.lineWidth = 2;
+                farmCtx.beginPath();
+                farmCtx.roundRect(menuX, menuY, menuW, menuH, 6);
+                farmCtx.fill();
+                farmCtx.stroke();
+
+                farmCtx.font = "bold 11px Arial";
+                farmCtx.textAlign = "left";
+                farmCtx.fillStyle = "#aaa";
+                farmCtx.fillText(`Goat T${goat.tier}  +${def.productAmount} milk/${def.productionTime}s`,
+                    menuX + 10, menuY + 20);
+
+                farmCtx.strokeStyle = "#444";
+                farmCtx.lineWidth = 1;
+                farmCtx.beginPath();
+                farmCtx.moveTo(menuX + 8, menuY + 28);
+                farmCtx.lineTo(menuX + menuW - 8, menuY + 28);
+                farmCtx.stroke();
+
+                if (isMaxTier) {
+                    farmCtx.fillStyle = "#555";
+                    farmCtx.fillText("⬆ Max tier", menuX + 10, menuY + 50);
+                } else {
+                    farmCtx.fillStyle = canUpgrade ? "#f0f0d8" : "#888";
+                    farmCtx.fillText(`⬆ T${goat.tier + 1}`, menuX + 10, menuY + 50);
+                    drawFarmCostList(nextDef.cost, menuX + 10, menuY + 65);
+                    farmCtx.font = "10px Arial";
+                    farmCtx.fillStyle = "#80ff40";
+                    farmCtx.fillText(`+${nextDef.productAmount} milk/${nextDef.productionTime}s`,
+                        menuX + 10, menuY + 85);
+                    farmCtx.font = "bold 11px Arial";
+                    farmCtx.strokeStyle = "#444";
+                    farmCtx.lineWidth = 1;
+                    farmCtx.beginPath();
+                    farmCtx.moveTo(menuX + 8, menuY + 93);
+                    farmCtx.lineTo(menuX + menuW - 8, menuY + 93);
+                    farmCtx.stroke();
+                    farmCtx.fillStyle = "#aaa";
+                    farmCtx.fillText("Click building to collect", menuX + 10, menuY + 110);
+                }
+            }
+        }
+        function drawFarmCostList(cost, x, y) {
+            let offsetX = 0;
+            for (let [resource, amount] of Object.entries(cost)) {
+                const canPay = (resources[resource] || 0) >= amount;
+                const icon = resourceIcons[resource];
+                if (icon) {
+                    farmCtx.drawImage(icon, x + offsetX, y - 10, 14, 14);
+                    offsetX += 16;
+                }
+                farmCtx.fillStyle = canPay ? "#80ff40" : "#ff4444";
+                farmCtx.font = "10px Arial";
+                farmCtx.textAlign = "left";
+                farmCtx.fillText(`${amount}`, x + offsetX, y);
+                offsetX += 20;
+            }
+        }
+        const TIER_HEX_COLORS = ["", "", "#4fc94f", "#4a8fff", "#c04aff", "#ffd700"];
+
+        function drawRopery() {
+            const now = performance.now();
+            const ropery = workshops.ropery;
+            const def = workshopDefs["ropery"] ? workshopDefs["ropery"][ropery.tier] : null;
+
+            // Tier hex ring (tier 2+)
+            if (ropery.tier >= 2) {
+                const cx = ROPERY_X;
+                const cy = ROPERY_Y - ROPERY_H / 2;
+                const r = 46;
+                const color = TIER_HEX_COLORS[ropery.tier] || "#ffd700";
+                farmCtx.beginPath();
+                for (let i = 0; i < 6; i++) {
+                    const angle = (Math.PI / 3) * i - Math.PI / 6;
+                    const hx = cx + r * Math.cos(angle);
+                    const hy = cy + r * Math.sin(angle);
+                    i === 0 ? farmCtx.moveTo(hx, hy) : farmCtx.lineTo(hx, hy);
+                }
+                farmCtx.closePath();
+                farmCtx.fillStyle = color + "22";
+                farmCtx.fill();
+                farmCtx.strokeStyle = color;
+                farmCtx.lineWidth = 2.5;
+                farmCtx.stroke();
+
+                // Tier digit — same style as tower hexes
+                farmCtx.font = "bold 13px Arial";
+                farmCtx.textAlign = "center";
+                farmCtx.textBaseline = "middle";
+                farmCtx.fillStyle = color;
+                farmCtx.fillText(ropery.tier, cx, cy + r * 0.62);
+                farmCtx.textBaseline = "alphabetic";
+            }
+
+            // Building sprite
+            farmCtx.drawImage(roperyImage,
+                ROPERY_X - ROPERY_W / 2,
+                ROPERY_Y - ROPERY_H,
+                ROPERY_W, ROPERY_H);
+
+            // Label
+            farmCtx.fillStyle = "#f0f0d8";
+            farmCtx.font = "bold 11px Arial";
+            farmCtx.textAlign = "center";
+            farmCtx.fillText("Ropery", ROPERY_X, ROPERY_Y + 14);
+
+            if (!def) return;
+
+            // Progress bar
+            const barW = 70;
+            const barH = 6;
+            const barX = ROPERY_X - barW / 2;
+            const barY = ROPERY_Y + 20;
+
+            let progress = 0;
+            if (ropery.productionStart !== null) {
+                const elapsed = now - ropery.productionStart;
+                progress = Math.min(elapsed / (def.productionTime * 1000), 1);
+            }
+
+            farmCtx.fillStyle = "#333";
+            farmCtx.fillRect(barX, barY, barW, barH);
+            farmCtx.fillStyle = "#80ff40";
+            farmCtx.fillRect(barX, barY, barW * progress, barH);
+            farmCtx.strokeStyle = "#555";
+            farmCtx.lineWidth = 1;
+            farmCtx.strokeRect(barX, barY, barW, barH);
+
+            // Stored counter
+            if (ropery.stored > 0) {
+                farmCtx.fillStyle = "#ffd700";
+                farmCtx.font = "bold 12px Arial";
+                farmCtx.textAlign = "center";
+                farmCtx.fillText(`🧵 ${ropery.stored}`, ROPERY_X, barY + 20);
+            }
+        }
+        function drawGoat() {
+            const now = performance.now();
+            const goat = workshops.goat;
+            const def = workshopDefs["goat"] ? workshopDefs["goat"][goat.tier] : null;
+
+            // Tier hex ring (tier 2+)
+            if (goat.tier >= 2) {
+                const cx = GOAT_X;
+                const cy = GOAT_Y - GOAT_H / 2;
+                const r = 46;
+                const color = TIER_HEX_COLORS[goat.tier] || "#ffd700";
+                farmCtx.beginPath();
+                for (let i = 0; i < 6; i++) {
+                    const angle = (Math.PI / 3) * i - Math.PI / 6;
+                    const hx = cx + r * Math.cos(angle);
+                    const hy = cy + r * Math.sin(angle);
+                    i === 0 ? farmCtx.moveTo(hx, hy) : farmCtx.lineTo(hx, hy);
+                }
+                farmCtx.closePath();
+                farmCtx.fillStyle = color + "22";
+                farmCtx.fill();
+                farmCtx.strokeStyle = color;
+                farmCtx.lineWidth = 2.5;
+                farmCtx.stroke();
+                farmCtx.font = "bold 13px Arial";
+                farmCtx.textAlign = "center";
+                farmCtx.textBaseline = "middle";
+                farmCtx.fillStyle = color;
+                farmCtx.fillText(goat.tier, cx, cy + r * 0.62);
+                farmCtx.textBaseline = "alphabetic";
+            }
+
+            // Sprite
+            farmCtx.drawImage(goatImage,
+                GOAT_X - GOAT_W / 2,
+                GOAT_Y - GOAT_H,
+                GOAT_W, GOAT_H);
+
+            // Label
+            farmCtx.fillStyle = "#f0f0d8";
+            farmCtx.font = "bold 11px Arial";
+            farmCtx.textAlign = "center";
+            farmCtx.fillText("Goat", GOAT_X, GOAT_Y + 14);
+
+            if (!def) return;
+
+            // Progress bar
+            const barW = 70;
+            const barH = 6;
+            const barX = GOAT_X - barW / 2;
+            const barY = GOAT_Y + 20;
+            let progress = 0;
+            if (goat.productionStart !== null) {
+                const elapsed = now - goat.productionStart;
+                progress = Math.min(elapsed / (def.productionTime * 1000), 1);
+            }
+            farmCtx.fillStyle = "#333";
+            farmCtx.fillRect(barX, barY, barW, barH);
+            farmCtx.fillStyle = "#80d4ff";
+            farmCtx.fillRect(barX, barY, barW * progress, barH);
+            farmCtx.strokeStyle = "#555";
+            farmCtx.lineWidth = 1;
+            farmCtx.strokeRect(barX, barY, barW, barH);
+
+            if (goat.stored > 0) {
+                farmCtx.fillStyle = "#ffd700";
+                farmCtx.font = "bold 12px Arial";
+                farmCtx.textAlign = "center";
+                farmCtx.fillText(`🥛 ${goat.stored}`, GOAT_X, barY + 20);
+            }
+        }
+
         // ─── GAME LOOP ────────────────────────────────────────────────────────────────
         function gameLoop(timestamp) {
             const dt = lastFrameTime === null ? 1 : Math.min((timestamp - lastFrameTime) / (1000 / 60), 3);
@@ -2215,7 +2738,8 @@ function updateTowers(dt) {
                 currentScreen = "farm";
                 gameScreen.style.display = "none";
                 farmScreen.style.display = "block";
-                drawFarmScreen();
+                cancelAnimationFrame(farmAnimationId);
+                farmLoop();
                 updateFarmUI();
             });
         }
@@ -2223,6 +2747,7 @@ function updateTowers(dt) {
         function showGame() {
             fadeTransition(() => {
                 currentScreen = "game";
+                cancelAnimationFrame(farmAnimationId);
                 farmScreen.style.display = "none";
                 gameScreen.style.display = "block";
             });
