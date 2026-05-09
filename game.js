@@ -227,6 +227,8 @@ const catapultImage = new Image();
 catapultImage.src = "images/catapult.png";
 const wardenImage = new Image();
 wardenImage.src = "images/warden.png";
+const carriageImage = new Image();
+carriageImage.src = "images/carriage.png";
 const crossbowImage = new Image();
 crossbowImage.src = "images/crossbowTower.png";
 const fenceImage = new Image();
@@ -257,7 +259,8 @@ const resourceIcons = {
     rope: ropeIcon
 };
 // Anchor offsets — raise sprite by this many px to compensate for transparent padding
-const LUMBERJACK_ANCHOR_OFFSET = 8;  
+const LUMBERJACK_ANCHOR_OFFSET = 8;
+const CARRIAGE_ANCHOR_OFFSET = 10;
 const CATAPULT_ANCHOR_OFFSET = 12;  
 const WARDEN_ANCHOR_OFFSET = 12; 
 const CROSSBOW_ANCHOR_OFFSET = 12; 
@@ -609,7 +612,8 @@ function startWave() {
 function spawnEnemy(code) {
     const typeMap = {
         "lu": "lumberjack",
-        "wa": "warden"
+        "wa": "warden",
+        "ca": "carriage"
     };
     const type = typeMap[code];
     if (!type || !enemyDefs[type]) return;
@@ -735,10 +739,11 @@ function drawEnemies() {
     const now = performance.now();
     for (let enemy of enemies) {
         const isWarden = enemy.type === "warden";
-        const sw = isWarden ? 52 : 40;
-        const sh = isWarden ? 56 : 48;
-        const offset = (isWarden ? WARDEN_ANCHOR_OFFSET : LUMBERJACK_ANCHOR_OFFSET) + (enemy.anchorOffset || 0);
-        const sprite = isWarden ? wardenImage : lumberjackImage;
+        const isCarriage = enemy.type === "carriage";
+        const sw = isWarden ? 52 : isCarriage ? 56 : 40;
+        const sh = isWarden ? 56 : isCarriage ? 48 : 48;
+        const offset = (isWarden ? WARDEN_ANCHOR_OFFSET : isCarriage ? CARRIAGE_ANCHOR_OFFSET : LUMBERJACK_ANCHOR_OFFSET) + (enemy.anchorOffset || 0);
+        const sprite = isWarden ? wardenImage : isCarriage ? carriageImage : lumberjackImage;
 
         const drawX = enemy.x - sw / 2;
         const drawY = enemy.y - sh + offset;
@@ -784,7 +789,7 @@ function drawEnemies() {
                     // HP bar
                     ctx.fillStyle = "red";
                     ctx.fillRect(drawX, drawY - 6, sw, 4);
-                    ctx.fillStyle = isWarden ? "orange" : "lime";
+                    ctx.fillStyle = isWarden ? "orange" : isCarriage ? "cyan" : "lime";
                     ctx.fillRect(drawX, drawY - 6, sw * (enemy.hp / enemy.maxHp), 4);
                     continue;
                 }
